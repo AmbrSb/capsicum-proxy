@@ -1,0 +1,46 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/gsl-download/CMakeFiles/gsl"
+		},
+		{
+			"file" : "/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/gsl-download/CMakeFiles/gsl.rule"
+		},
+		{
+			"file" : "/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/gsl-download/CMakeFiles/gsl-complete.rule"
+		},
+		{
+			"file" : "/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/gsl-download/gsl-prefix/src/gsl-stamp/gsl-install.rule"
+		},
+		{
+			"file" : "/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/gsl-download/gsl-prefix/src/gsl-stamp/gsl-mkdir.rule"
+		},
+		{
+			"file" : "/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/gsl-download/gsl-prefix/src/gsl-stamp/gsl-download.rule"
+		},
+		{
+			"file" : "/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/gsl-download/gsl-prefix/src/gsl-stamp/gsl-update.rule"
+		},
+		{
+			"file" : "/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/gsl-download/gsl-prefix/src/gsl-stamp/gsl-patch.rule"
+		},
+		{
+			"file" : "/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/gsl-download/gsl-prefix/src/gsl-stamp/gsl-configure.rule"
+		},
+		{
+			"file" : "/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/gsl-download/gsl-prefix/src/gsl-stamp/gsl-build.rule"
+		},
+		{
+			"file" : "/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/gsl-download/gsl-prefix/src/gsl-stamp/gsl-test.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"gsl"
+		],
+		"name" : "gsl"
+	}
+}

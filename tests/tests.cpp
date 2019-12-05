@@ -55,31 +55,32 @@ public:
         _res = "return:" + _(1);
     }
 
-
 #undef _
 #undef _res
 };
 
 TEST(ProxyTest, NumericTest) {
-    Proxy<Service<Req1>> p{4096};
+    auto p = Proxy<Req1, 4096, Service>::Build();
     auto result = p.Execute(1, 10, 34);
     ASSERT_EQ(result, 45.78);
+    result = p.Execute(7, 19, 23);
+    ASSERT_EQ(result, 49.78);
 }
 
 TEST(ProxyTest, StringTest) {
-    Proxy<Service<Req2>> p{4096};
+    auto p = Proxy<Req2, 4096, Service>::Build();
     auto result = p.Execute("hello"s);
     ASSERT_EQ(result, 5);
 }
 
 TEST(ProxyTest, StringReturnTest) {
-    Proxy<Service<Req3>> p{4096};
+    auto p = Proxy<Req3, 4096, Service>::Build();
     auto result = p.Execute("hello_2"s);
     ASSERT_STREQ(result.c_str(), "return:hello_2");
 }
 
 TEST(ProxyDLOAPITest, NumericTest) {
-    ProxySO<Req4> p{4096, "/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/libtest.so"};
+    auto p = Proxy<Req4, 4096>::Build("/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/libtest.so");
     auto result = p.Execute("add"s, 20, 30);
     ASSERT_EQ(result, 50);
 }

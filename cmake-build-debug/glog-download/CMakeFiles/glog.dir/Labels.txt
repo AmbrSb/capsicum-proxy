@@ -1,0 +1,14 @@
+# Target labels
+ glog
+# Source files and their labels
+/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/glog-download/CMakeFiles/glog
+/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/glog-download/CMakeFiles/glog.rule
+/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/glog-download/CMakeFiles/glog-complete.rule
+/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/glog-download/glog-prefix/src/glog-stamp/glog-install.rule
+/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/glog-download/glog-prefix/src/glog-stamp/glog-mkdir.rule
+/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/glog-download/glog-prefix/src/glog-stamp/glog-download.rule
+/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/glog-download/glog-prefix/src/glog-stamp/glog-update.rule
+/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/glog-download/glog-prefix/src/glog-stamp/glog-patch.rule
+/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/glog-download/glog-prefix/src/glog-stamp/glog-configure.rule
+/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/glog-download/glog-prefix/src/glog-stamp/glog-build.rule
+/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/glog-download/glog-prefix/src/glog-stamp/glog-test.rule

@@ -63,9 +63,12 @@ auto pop_front(const Tuple& tuple)
                           std::make_index_sequence<std::tuple_size<Tuple>::value - 1>());
 }
 
+template<std::size_t SZ> class SegmentDescriptor;
+
+template <std::size_t SZ>
 class Channel {
 public:
-    friend class SegmentDescriptor;
+    friend class SegmentDescriptor<SZ>;
     Channel(std::size_t sz)
     {
         base_ = mmap(nullptr, sz,
@@ -89,14 +92,15 @@ private:
 #endif
 };
 
+template<std::size_t SZ>
 class Segment {
 public:
-    friend class SegmentDescriptor;
+    friend class SegmentDescriptor<SZ>;
 
-    Segment(std::size_t chan_sz)
+    Segment()
         : turn_{kParent},
-          send_{chan_sz},
-          recv_{chan_sz}
+          send_{SZ},
+          recv_{SZ}
     {
         pthread_mutexattr_t attr;
         pthread_mutexattr_init(&attr);
@@ -114,14 +118,25 @@ private:
     // XXX: use a ring queue so that we can have multiple requests queued at the same time.
     volatile ChannelSide turn_;
     pthread_mutex_t      mtx_;
-    Channel              send_;
-    Channel              recv_;
+    Channel<SZ>          send_;
+    Channel<SZ>          recv_;
     uint32_t             magic_ = kSegmentMagic;
 };
 
+template<std::size_t SZ>
 class SegmentDescriptor {
 public:
-    SegmentDescriptor(ChannelSide side, Segment& seg)
+    Channel<SZ>& GetSendChannel() const
+    {
+        return ((side_ == kParent) ? segment_.send_ : segment_.recv_);
+    }
+
+    Channel<SZ>& GetRecvChannel() const
+    {
+        return ((side_ == kParent) ? segment_.recv_ : segment_.send_);
+    }
+
+    SegmentDescriptor(ChannelSide side, Segment<SZ>& seg)
         : side_{side},
           segment_{seg}
     {
@@ -131,16 +146,6 @@ public:
     ~SegmentDescriptor()
     {
         GetSendChannel().status_ = kClosed;
-    }
-
-    Channel& GetSendChannel() const
-    {
-        return ((side_ == kParent) ? segment_.send_ : segment_.recv_);
-    }
-
-    Channel& GetRecvChannel() const
-    {
-        return ((side_ == kParent) ? segment_.recv_ : segment_.send_);
     }
 
     static __always_inline void
@@ -217,25 +222,24 @@ public:
     }
 
     void Switch()
-    {
-        segment_.turn_ = (segment_.turn_ == kParent) ? kChild : kParent;
-    }
-
-    Segment& GetSegment() const
+    { segment_.turn_ = (segment_.turn_ == kParent) ? kChild : kParent; }
+   
+    Segment<SZ>& GetSegment() const
     {
         return segment_;
     }
 
 private:
     ChannelSide side_;
-    Segment&    segment_;
+    Segment<SZ>&    segment_;
 };
 
 
+template<std::size_t SZ>
 class Stub {
 public:
-    Stub(std::size_t chan_sz)
-        : chan_sz_{chan_sz}
+    Stub()
+        : chan_sz_{SZ}
     { }
 
     template <typename... Args>
@@ -298,60 +302,46 @@ sig_handler(int signo)
     child_terminated = true;
 }
 
-template <typename SERV>
-class Proxy {
-private:
-    using RET = std::tuple_element_t<0, typename SERV::request_type>;
-public:
-    using func_type = int (*)(std::tuple<int, int>);
+class BaseProxy {};
 
-    Proxy(std::size_t chan_sz)
-        : service_{},
-          stub_{chan_sz},
-          chan_sz_{chan_sz}
+template <typename REQ, std::size_t SZ>
+class AbstractProxy: public BaseProxy {
+protected:
+    using RET = std::tuple_element_t<0, REQ>;
+
+    AbstractProxy()
+        : stub_{},
+          chan_sz_{SZ}
     {
-        static_assert(sizeof(Segment) <= PAGE_SIZE);
+        this->Init();
+    }
+
+    void Init()
+    {
+        static_assert(sizeof(Segment<SZ>) <= PAGE_SIZE);
+
         void* m = mmap(nullptr, PAGE_SIZE,
                        PROT_READ | PROT_WRITE,
                        MAP_SHARED | MAP_ANONYMOUS, 0, 0);
         if (!m)
             PROXY_LOG(ERROR) << "Cannot create shared memory for segment";
-        Segment* seg = new (m) Segment{chan_sz};
+        Segment<SZ>* seg = new (m) Segment<SZ>{};
         parent_terminated = false;
         child_terminated = false;
         pid_t pid = fork();
         if (pid == 0) {
-            segd_ = std::make_unique<SegmentDescriptor>(kChild, *seg);
-            ServiceLoop();
+            segd_ = std::make_unique<SegmentDescriptor<SZ>>(kChild, *seg);
+            side_ = kChild;
         } else if (pid > 0) {
             InstallSignalHandlers();
-            segd_ = std::make_unique<SegmentDescriptor>(kParent, *seg);
+            segd_ = std::make_unique<SegmentDescriptor<SZ>>(kParent, *seg);
+            side_ = kParent;
         } else
             PROXY_LOG(ERROR) << "fork() failed: ";
-        
     }
 
-    ~Proxy()
-    {}
+    virtual void Do(REQ&) = 0;
 
-    template <typename... Args>
-    RET
-    Execute(Args... args)
-    {
-        void* base = segd_->GetSendChannel().GetBase();
-        stub_.CreateRequest(base, args...);
-        segd_->Switch();
-        try {
-            segd_->Wait();
-        } catch (ChildTerminated& cte) {
-            std::cerr << "Child died" << std::endl;
-            throw OperationFailed{};
-        }
-        RET result = stub_.template ParseResult<RET>(segd_->GetRecvChannel().GetBase());
-        return result;
-    }
-
-private:
     void
     InstallSignalHandlers() {
         struct sigaction sa;
@@ -360,6 +350,29 @@ private:
         sa.sa_flags = 0;
         if (sigaction(SIGCHLD, &sa, nullptr) < 0)
             throw 111;
+    }
+
+    void StartServiceLoop()
+    {
+        while (true) {
+            try {
+                this->segd_->Wait();
+            } catch (ParentTerminated& pte) {
+                std::cerr << "Parent died" << std::endl;
+                exit(1);
+            }
+            REQ ins = this->template ExtractParams<REQ>(this->segd_->GetRecvChannel().GetBase());
+            Do(ins);
+            this->PutResult(ins, this->segd_->GetSendChannel().GetBase());
+            this->segd_->Switch();
+        }
+        __builtin_unreachable();
+    }
+
+    void
+    StartServiceLoopForChild() {
+        if (side_ == kChild)
+            StartServiceLoop();
     }
 
     template <int N, typename TUP>
@@ -432,70 +445,7 @@ private:
         }
     }
 
-        void ServiceLoop()
-    {
-        while (true) {
-            try {
-                segd_->Wait();
-            } catch (ParentTerminated& pte) {
-                std::cerr << "Parent died" << std::endl;
-                exit(1);
-            }
-            using RQ = typename SERV::request_type;
-            RQ ins = ExtractParams<RQ>(segd_->GetRecvChannel().GetBase());
-            service_.Handle(ins);
-            PutResult(ins, segd_->GetSendChannel().GetBase());
-            segd_->Switch();
-        }
-    }
-    std::unique_ptr<SegmentDescriptor> segd_;
-    SERV service_;
-    Stub stub_;
-    void* handle_;
-    std::size_t chan_sz_;
-};
-
-template <typename RQ>
-class ProxySO {
-private:
-    using RET = std::tuple_element_t<0, RQ>;
 public:
-    using func_type = int (*)(std::tuple<int, int>);
-
-    ProxySO(std::size_t chan_sz, std::string soname)
-        : stub_{chan_sz},
-          chan_sz_{chan_sz}
-    {
-        handle_ = dlopen(soname.c_str(), RTLD_LOCAL | RTLD_NOW);
-        if (!handle_) {
-            std::cerr << "failed to open lib" << std::endl;
-            exit(1);
-        }
-
-        static_assert(sizeof(Segment) <= PAGE_SIZE);
-        void* m = mmap(nullptr, PAGE_SIZE,
-                       PROT_READ | PROT_WRITE,
-                       MAP_SHARED | MAP_ANONYMOUS, 0, 0);
-        if (!m)
-            PROXY_LOG(ERROR) << "Cannot create shared memory for segment";
-        Segment* seg = new (m) Segment{chan_sz};
-        parent_terminated = false;
-        child_terminated = false;
-        pid_t pid = fork();
-        if (pid == 0) {
-            segd_ = std::make_unique<SegmentDescriptor>(kChild, *seg);
-            ServiceLoop();
-        } else if (pid > 0) {
-            InstallSignalHandlers();
-            segd_ = std::make_unique<SegmentDescriptor>(kParent, *seg);
-        } else
-            PROXY_LOG(ERROR) << "fork() failed: ";
-        
-    }
-
-    ~ProxySO()
-    {}
-
     template <typename... Args>
     RET
     Execute(Args... args)
@@ -513,96 +463,94 @@ public:
         return result;
     }
 
-private:
-    void
-    InstallSignalHandlers() {
-        struct sigaction sa;
-        sa.sa_handler = sig_handler;
-        sigemptyset(&sa.sa_mask);
-        sa.sa_flags = 0;
-        if (sigaction(SIGCHLD, &sa, nullptr) < 0)
-            throw 111;
-    }
 
-    template <int N, typename TUP>
-    void
-    ExtractElem(TUP& instance, void*& recv) {
-        if constexpr (std::tuple_size<TUP>::value >= N + 1)
-        {
-            using TYPE = std::tuple_element_t<N, TUP>;
-            std::size_t offset;
-            if constexpr (std::is_same<TYPE, std::string>::value) {
-                char* item = static_cast<char*>(recv);
-                std::cerr << "got paramAAA: " << item << std::endl;
-                std::string tmp {item};
-                std::get<N>(instance) = tmp;
-                offset = tmp.size();
-                offset = ((offset / kSHMAlignment) + 1) * kSHMAlignment;
-            } else {
-                std::add_pointer_t<TYPE> p0;
-                auto item = static_cast<decltype(p0)>(recv);
-                std::cerr << "got paramBBB: " << *item << std::endl;
-                offset = kSHMAlignment;
-                std::get<N>(instance) = *item;
-            }
-            recv += offset;
-        }
-    }
-
-    template <typename T>
-    auto
-    ExtractParams(void* recv) {
-        T tup;
-        static_assert(std::tuple_size<T>::value <= 17);
-        ExtractElem<1> (tup, recv);
-        ExtractElem<2> (tup, recv);
-        ExtractElem<3> (tup, recv);
-        ExtractElem<4> (tup, recv);
-        ExtractElem<5> (tup, recv);
-        ExtractElem<6> (tup, recv);
-        ExtractElem<7> (tup, recv);
-        ExtractElem<8> (tup, recv);
-        ExtractElem<9> (tup, recv);
-        ExtractElem<10>(tup, recv);
-        ExtractElem<11>(tup, recv);
-        ExtractElem<12>(tup, recv);
-        ExtractElem<13>(tup, recv);
-        ExtractElem<14>(tup, recv);
-        ExtractElem<15>(tup, recv);
-        ExtractElem<16>(tup, recv);
-        return tup;
-    }
-
-    template <typename T>
-    void
-    PutResult(T& tup, void* snd) {
-        std::add_pointer_t<std::tuple_element_t<0, T>> result;
-        result = static_cast<decltype(result)>(snd);
-        *result = std::get<0>(tup);
-    }
-
-    void ServiceLoop()
-    {
-        while (true) {
-            try {
-                segd_->Wait();
-            } catch (ParentTerminated& pte) {
-                std::cerr << "Parent died" << std::endl;
-                exit(1);
-            }
-            RQ ins = ExtractParams<RQ>(segd_->GetRecvChannel().GetBase());
-            auto func = (func_type)dlsym(handle_, std::get<1>(ins).c_str());
-            if (!func) {
-                std::cerr << "failed to lookup func" << std::endl;
-                exit(3);
-            }
-            std::get<0>(ins) = func(pop_front(pop_front(ins)));
-            PutResult(ins, segd_->GetSendChannel().GetBase());
-            segd_->Switch();
-        }
-    }
-    std::unique_ptr<SegmentDescriptor> segd_;
-    Stub stub_;
+protected:
+    std::unique_ptr<SegmentDescriptor<SZ>> segd_;
+    Stub<SZ> stub_;
     void* handle_;
     std::size_t chan_sz_;
+    ChannelSide side_;
+};
+
+template <typename REQ, std::size_t SZ, template<typename> class SERV>
+class ProxyDirect final: public AbstractProxy<REQ, SZ> {
+public:
+    using RET = typename AbstractProxy<REQ, SZ>::RET;
+
+    ProxyDirect()
+        : AbstractProxy<REQ, SZ>{},
+          service_{}
+    {
+        this->StartServiceLoopForChild();
+    }
+
+    ~ProxyDirect()
+    {}
+
+    void
+    Do(REQ& ins) override
+    {
+        service_.Handle(ins);
+    }
+
+private:
+    SERV<REQ> service_;
+};
+
+template <typename REQ, std::size_t SZ>
+class ProxySO final: public AbstractProxy<REQ, SZ> {
+private:
+    using RET = typename AbstractProxy<REQ, SZ>::RET;
+
+public:
+    ProxySO(std::string soname)
+        : AbstractProxy<REQ, SZ>{}
+    {
+        handle_ = dlopen(soname.c_str(), RTLD_LOCAL | RTLD_NOW);
+        if (!handle_) {
+            std::cerr << "failed to open lib" << std::endl;
+            exit(1);
+        }
+        this->StartServiceLoopForChild();
+    }
+
+    ~ProxySO()
+    {}
+
+private:
+
+    void
+    Do(REQ& ins) override
+    {
+        auto args = pop_front(pop_front(ins));
+        using func_type = RET (*)(decltype(args));
+        // XXX cache the function pointer
+        auto func = (func_type)dlsym(handle_, std::get<1>(ins).c_str());
+        if (!func) {
+            std::cerr << "failed to lookup func" << std::endl;
+            exit(3);
+        }
+        std::get<0>(ins) = func(args);
+    }
+
+    void* handle_;
+};
+
+template<typename REQ,
+         std::size_t SZ = 4096,
+         template<typename> class SERV = std::void_t>
+class Proxy {
+public:
+
+    template<typename... Args>
+    static
+    decltype(auto)
+    Build(Args... args) {
+        if constexpr (sizeof...(args) == 0) {
+            return ProxyDirect<REQ, SZ, SERV>{};
+        } else if constexpr (sizeof...(args) == 1) {
+            return ProxySO<REQ, SZ>{args...};
+        }
+    }
+
 };

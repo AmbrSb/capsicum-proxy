@@ -1,0 +1,3 @@
+/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/gsl-download/CMakeFiles/rebuild_cache.dir
+/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/gsl-download/CMakeFiles/gsl.dir
+/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/gsl-download/CMakeFiles/edit_cache.dir

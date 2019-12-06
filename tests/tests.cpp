@@ -34,7 +34,6 @@ using Ret3 = std::string;
 using Req4 = std::tuple<std::string, int, int>;
 using Ret4 = int;
 
-template<typename T>
 class Service {
 public:
 // XXX: use user defined literals instead of this macro
@@ -68,28 +67,28 @@ public:
 };
 
 TEST(ProxyTest, NumericTest) {
-    auto p = Proxy<Req1, Ret1, 4096, Service>::Build();
-    auto result = p.Execute(1, 10, 34);
+    auto p = Proxy<4096, Service>::Build();
+    auto result = p.Execute<double>(1, 10, 34);
     ASSERT_EQ(result, 45.78);
-    result = p.Execute(7, 19, 23);
+    result = p.Execute<double>(7, 19, 23);
     ASSERT_EQ(result, 49.78);
 }
 
 TEST(ProxyTest, StringTest) {
-    auto p = Proxy<Req2, Ret2, 4096, Service>::Build();
-    auto result = p.Execute(9, "hello"s);
+    auto p = Proxy<4096, Service>::Build();
+    auto result = p.Execute<std::size_t>(9, "hello"s);
     ASSERT_EQ(result, 14);
 }
 
 TEST(ProxyTest, StringReturnTest) {
-    auto p = Proxy<Req3, Ret3, 4096, Service>::Build();
-    auto result = p.Execute("hello_2"s);
+    auto p = Proxy<4096, Service>::Build();
+    auto result = p.Execute<std::string>("hello_2"s);
     ASSERT_STREQ(result.c_str(), "return:hello_2");
 }
 
 TEST(ProxyDLOAPITest, NumericTest) {
-    auto p = Proxy<Req4, Ret4, 4096>::Build("/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/libtest.so");
-    auto result = p.Execute("add"s, 20, 30);
+    auto p = Proxy<4096>::Build("/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/libtest.so");
+    auto result = p.Execute<int>("add"s, 20, 30);
     ASSERT_EQ(result, 50);
 }
 

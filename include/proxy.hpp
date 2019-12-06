@@ -401,7 +401,7 @@ struct remove_first_type<std::tuple<T, Ts...>>
 };
 
 
-template <typename REQ, typename RET, std::size_t SZ>
+template <typename SUB, std::size_t SZ>
 class AbstractProxy: public BaseProxy {
 protected:
 
@@ -436,8 +436,6 @@ protected:
             PROXY_LOG(ERROR) << "fork() failed: ";
     }
 
-    virtual RET Do(REQ&) = 0;
-
     void
     InstallSignalHandlers() {
         struct sigaction sa;
@@ -448,12 +446,14 @@ protected:
             throw 111;
     }
 
-    void StartServiceLoop()
+    template<typename RET, typename... Args>
+    void
+    StartServiceLoop()
     {
         while (true) {
             try {
-                REQ ins = this->segd_->template ExtractParams<REQ>();
-                auto result = Do(ins);
+                auto ins = this->segd_->template ExtractParams<std::tuple<Args...>>();
+                RET result = static_cast<SUB*>(this)->template Do<RET>(ins);
                 this->segd_->SendRequest(result);
             } catch (ParentTerminated& pte) {
                 std::cerr << "Parent died" << std::endl;
@@ -463,17 +463,19 @@ protected:
         __builtin_unreachable();
     }
 
+    template<typename RET, typename... Args>
     void
     StartServiceLoopForChild() {
         if (side_ == kChild)
-            StartServiceLoop();
+            StartServiceLoop<RET, Args...>();
     }
 
 public:
-    template <typename... Args>
+    template <typename RET, typename... Args>
     RET
     Execute(Args... args)
     {
+        this->StartServiceLoopForChild<RET, Args...>();
         stub_->SendRequest(args...);
         RET result = stub_->template ExtractParams<RET>();
         return result;
@@ -487,50 +489,48 @@ protected:
     ChannelSide side_;
 };
 
-template <typename REQ, typename RET, std::size_t SZ, template<typename> class SERV>
-class ProxyDirect final: public AbstractProxy<REQ, RET, SZ> {
+template <std::size_t SZ, typename SERV>
+class ProxyDirect final: public AbstractProxy<ProxyDirect<SZ, SERV>, SZ> {
 public:
     ProxyDirect()
-        : AbstractProxy<REQ, RET, SZ>{},
+        : AbstractProxy<ProxyDirect, SZ>{},
           service_{}
     {
-        this->StartServiceLoopForChild();
     }
 
     ~ProxyDirect()
     {}
 
-private:
+    template<typename RET, typename REQ>
     RET
-    Do(REQ& ins) override
+    Do(REQ& ins)
     {
         return service_.Handle(ins);
     }
 
-    SERV<REQ> service_;
+private:
+    SERV service_;
 };
 
-template <typename REQ, typename RET, std::size_t SZ>
-class ProxySO final: public AbstractProxy<REQ, RET, SZ> {
+template <std::size_t SZ>
+class ProxySO final: public AbstractProxy<ProxySO<SZ>, SZ> {
 public:
     ProxySO(std::string soname)
-        : AbstractProxy<REQ, RET, SZ>{}
+        : AbstractProxy<ProxySO, SZ>{}
     {
         handle_ = dlopen(soname.c_str(), RTLD_LOCAL | RTLD_NOW);
         if (!handle_) {
             std::cerr << "failed to open lib" << std::endl;
             exit(1);
         }
-        this->StartServiceLoopForChild();
     }
 
     ~ProxySO()
     {}
 
-private:
-
+    template<typename RET, typename REQ>
     RET
-    Do(REQ& ins) override
+    Do(REQ& ins)
     {
         using ARGS = typename remove_first_type<REQ>::type;
         using func_type = RET (*)(ARGS);
@@ -543,12 +543,12 @@ private:
         return func(pop_front(ins));
     }
 
+private:
     void* handle_;
 };
 
-template<typename REQ, typename RET,
-         std::size_t SZ = 4096,
-         template<typename> class SERV = std::void_t>
+template<std::size_t SZ = 4096,
+         typename SERV = std::void_t<void>>
 class Proxy {
 public:
 
@@ -557,9 +557,9 @@ public:
     decltype(auto)
     Build(Args... args) {
         if constexpr (sizeof...(args) == 0) {
-            return ProxyDirect<REQ, RET, SZ, SERV>{};
+            return ProxyDirect<SZ, SERV>{};
         } else if constexpr (sizeof...(args) == 1) {
-            return ProxySO<REQ, RET, SZ>{args...};
+            return ProxySO<SZ>{args...};
         }
     }
 

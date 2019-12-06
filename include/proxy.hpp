@@ -148,10 +148,10 @@ public:
 
     template <typename T>
     auto
-    ExtractParams() {
-        void* recv = send_;
+    ExtractParams(void* recv) {
         T tup;
         static_assert(std::tuple_size<T>::value <= 17);
+        ExtractElem<0> (tup, recv);
         ExtractElem<1> (tup, recv);
         ExtractElem<2> (tup, recv);
         ExtractElem<3> (tup, recv);
@@ -167,24 +167,7 @@ public:
         ExtractElem<13>(tup, recv);
         ExtractElem<14>(tup, recv);
         ExtractElem<15>(tup, recv);
-        ExtractElem<16>(tup, recv);
         return tup;
-    }
-
-    template <typename T>
-    void
-    PutResult(T& tup) {
-        void* snd = recv_;
-        using TYPE = std::tuple_element_t<0, T>;
-        std::size_t offset;
-        if constexpr (std::is_same<TYPE, std::string>::value) {
-            char* result = static_cast<char*>(snd);
-            strcpy(result, std::get<0>(tup).c_str());
-        } else {
-            std::add_pointer_t<TYPE> result;
-            result = static_cast<decltype(result)>(snd);
-            *result = std::get<0>(tup);
-        }
     }
 
 private:
@@ -200,11 +183,46 @@ private:
 template<std::size_t SZ>
 class SegmentDescriptor {
 public:
+    template <typename... Args>
+    void
+    SendRequest(Args... args) {
+        Unroll(GetSendChannel(), SZ, args...);
+        Switch();
+    }
+
+    template <typename T, typename... Args>
+    void
+    Unroll(void* base, std::size_t chan_sz, T t, Args... args)
+    {
+        std::size_t offset;
+        if constexpr (std::is_same<T, std::string>::value) {
+            char* base_param = static_cast<char*>(base);
+            strcpy(base_param, t.c_str());
+            std::string::size_type strlen = t.size();
+            base += strlen;
+            chan_sz -= strlen;
+            auto ret = std::align(kSHMAlignment, 1, base, chan_sz);
+            if (ret == nullptr)
+                throw 22;
+        } else {
+            T* base_param = static_cast<T*>(base);
+            *base_param = t;
+            base += sizeof(T);
+            chan_sz -= sizeof(T);
+            auto ret = std::align(kSHMAlignment, 1, base, chan_sz);
+            if (ret == nullptr)
+                throw 22;
+        }
+
+        if constexpr (sizeof...(args) > 0)
+            Unroll(base, chan_sz, args...);
+    }
+
     template <typename T>
     auto
     ExtractParams() {
         Wait();
-        return segment_.template ExtractParams<T>();
+        return segment_.template ExtractParams<T>(GetRecvChannel());
     }
 
     template <typename T>
@@ -334,55 +352,23 @@ public:
     template <typename... Args>
     void
     SendRequest(Args... args) {
-        Unroll(segd_->GetSendChannel(), args...);
-        segd_->Switch();
-    }
-
-    template <typename T, typename... Args>
-    void
-    Unroll(void* base, T t, Args... args)
-    {
-        std::size_t offset;
-        if constexpr (std::is_same<T, std::string>::value) {
-            char* base_param = static_cast<char*>(base);
-            strcpy(base_param, t.c_str());
-            std::string::size_type strlen = t.size();
-            base += strlen;
-            chan_sz_ -= strlen;
-            auto ret = std::align(kSHMAlignment, 1, base, chan_sz_);
-            if (ret == nullptr)
-                throw 22;
-        } else {
-            T* base_param = static_cast<T*>(base);
-            *base_param = t;
-            base += sizeof(T);
-            chan_sz_ -= sizeof(T);
-            auto ret = std::align(kSHMAlignment, 1, base, chan_sz_);
-            if (ret == nullptr)
-                throw 22;
-        }
-
-        if constexpr (sizeof...(args) > 0)
-            Unroll(base, args...);
+        segd_->SendRequest(args...);
     }
 
     template <typename R>
-    R
-    ReadResult() {
-        void* base = segd_->GetRecvChannel();
-        try {
-            segd_->Wait();
-        } catch (ChildTerminated& cte) {
-            std::cerr << "Child died" << std::endl;
-            throw OperationFailed{};
-        }
-        if constexpr (std::is_same<R, std::string>::value) {
-            char* result = static_cast<char*>(base);
-            return std::string{result};
-        } else {
-            R* result = static_cast<R*>(base);
-            return *result;
-        }
+    auto
+    ExtractParams() {
+        auto rt = segd_->template ExtractParams<std::tuple<R>>();
+        R r = std::get<0>(rt);
+        // std::cerr << "r: " << r << std::endl;
+        // void* base = segd_->GetRecvChannel();
+        // try {
+        //     segd_->Wait();
+        // } catch (ChildTerminated& cte) {
+        //     std::cerr << "Child died" << std::endl;
+        //     throw OperationFailed{};
+        // }
+        return r;
     }
 
 private:
@@ -402,10 +388,22 @@ sig_handler(int signo)
 
 class BaseProxy {};
 
-template <typename REQ, std::size_t SZ>
+
+template<typename T>
+struct remove_first_type
+{
+};
+
+template<typename T, typename... Ts>
+struct remove_first_type<std::tuple<T, Ts...>>
+{
+    using type = std::tuple<Ts...>;
+};
+
+
+template <typename REQ, typename RET, std::size_t SZ>
 class AbstractProxy: public BaseProxy {
 protected:
-    using RET = std::tuple_element_t<0, REQ>;
 
     AbstractProxy()
         : chan_sz_{SZ}
@@ -438,7 +436,7 @@ protected:
             PROXY_LOG(ERROR) << "fork() failed: ";
     }
 
-    virtual void Do(REQ&) = 0;
+    virtual RET Do(REQ&) = 0;
 
     void
     InstallSignalHandlers() {
@@ -455,8 +453,8 @@ protected:
         while (true) {
             try {
                 REQ ins = this->segd_->template ExtractParams<REQ>();
-                Do(ins);
-                this->segd_->PutResult(ins);
+                auto result = Do(ins);
+                this->segd_->SendRequest(result);
             } catch (ParentTerminated& pte) {
                 std::cerr << "Parent died" << std::endl;
                 exit(1);
@@ -477,7 +475,7 @@ public:
     Execute(Args... args)
     {
         stub_->SendRequest(args...);
-        RET result = stub_->template ReadResult<RET>();
+        RET result = stub_->template ExtractParams<RET>();
         return result;
     }
 
@@ -489,13 +487,11 @@ protected:
     ChannelSide side_;
 };
 
-template <typename REQ, std::size_t SZ, template<typename> class SERV>
-class ProxyDirect final: public AbstractProxy<REQ, SZ> {
+template <typename REQ, typename RET, std::size_t SZ, template<typename> class SERV>
+class ProxyDirect final: public AbstractProxy<REQ, RET, SZ> {
 public:
-    using RET = typename AbstractProxy<REQ, SZ>::RET;
-
     ProxyDirect()
-        : AbstractProxy<REQ, SZ>{},
+        : AbstractProxy<REQ, RET, SZ>{},
           service_{}
     {
         this->StartServiceLoopForChild();
@@ -504,24 +500,21 @@ public:
     ~ProxyDirect()
     {}
 
-    void
+private:
+    RET
     Do(REQ& ins) override
     {
-        service_.Handle(ins);
+        return service_.Handle(ins);
     }
 
-private:
     SERV<REQ> service_;
 };
 
-template <typename REQ, std::size_t SZ>
-class ProxySO final: public AbstractProxy<REQ, SZ> {
-private:
-    using RET = typename AbstractProxy<REQ, SZ>::RET;
-
+template <typename REQ, typename RET, std::size_t SZ>
+class ProxySO final: public AbstractProxy<REQ, RET, SZ> {
 public:
     ProxySO(std::string soname)
-        : AbstractProxy<REQ, SZ>{}
+        : AbstractProxy<REQ, RET, SZ>{}
     {
         handle_ = dlopen(soname.c_str(), RTLD_LOCAL | RTLD_NOW);
         if (!handle_) {
@@ -536,24 +529,24 @@ public:
 
 private:
 
-    void
+    RET
     Do(REQ& ins) override
     {
-        auto args = pop_front(pop_front(ins));
-        using func_type = RET (*)(decltype(args));
+        using ARGS = typename remove_first_type<REQ>::type;
+        using func_type = RET (*)(ARGS);
         // XXX cache the function pointer
-        auto func = (func_type)dlsym(handle_, std::get<1>(ins).c_str());
+        auto func = (func_type)dlsym(handle_, std::get<0>(ins).c_str());
         if (!func) {
             std::cerr << "failed to lookup func" << std::endl;
             exit(3);
         }
-        std::get<0>(ins) = func(args);
+        return func(pop_front(ins));
     }
 
     void* handle_;
 };
 
-template<typename REQ,
+template<typename REQ, typename RET,
          std::size_t SZ = 4096,
          template<typename> class SERV = std::void_t>
 class Proxy {
@@ -564,9 +557,9 @@ public:
     decltype(auto)
     Build(Args... args) {
         if constexpr (sizeof...(args) == 0) {
-            return ProxyDirect<REQ, SZ, SERV>{};
+            return ProxyDirect<REQ, RET, SZ, SERV>{};
         } else if constexpr (sizeof...(args) == 1) {
-            return ProxySO<REQ, SZ>{args...};
+            return ProxySO<REQ, RET, SZ>{args...};
         }
     }
 

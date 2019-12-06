@@ -1,0 +1,271 @@
+\hypertarget{proxy_8hpp}{}\section{include/proxy.hpp File Reference}
+\label{proxy_8hpp}\index{include/proxy.\+hpp@{include/proxy.\+hpp}}
+{\ttfamily \#include $<$atomic$>$}\newline
+{\ttfamily \#include $<$cstdint$>$}\newline
+{\ttfamily \#include $<$iostream$>$}\newline
+{\ttfamily \#include $<$memory$>$}\newline
+{\ttfamily \#include $<$type\+\_\+traits$>$}\newline
+{\ttfamily \#include $<$exception$>$}\newline
+{\ttfamily \#include $<$functional$>$}\newline
+{\ttfamily \#include $<$dlfcn.\+h$>$}\newline
+{\ttfamily \#include $<$immintrin.\+h$>$}\newline
+{\ttfamily \#include $<$sys/mman.\+h$>$}\newline
+{\ttfamily \#include $<$pthread.\+h$>$}\newline
+{\ttfamily \#include $<$unistd.\+h$>$}\newline
+{\ttfamily \#include $<$errno.\+h$>$}\newline
+{\ttfamily \#include $<$stdlib.\+h$>$}\newline
+{\ttfamily \#include $<$string.\+h$>$}\newline
+{\ttfamily \#include $<$signal.\+h$>$}\newline
+Include dependency graph for proxy.\+hpp\+:
+\nopagebreak
+\begin{figure}[H]
+\begin{center}
+\leavevmode
+\includegraphics[width=350pt]{proxy_8hpp__incl}
+\end{center}
+\end{figure}
+This graph shows which files directly or indirectly include this file\+:
+\nopagebreak
+\begin{figure}[H]
+\begin{center}
+\leavevmode
+\includegraphics[width=173pt]{proxy_8hpp__dep__incl}
+\end{center}
+\end{figure}
+\subsection*{Classes}
+\begin{DoxyCompactItemize}
+\item 
+class \hyperlink{classParentTerminated}{Parent\+Terminated}
+\item 
+class \hyperlink{classChildTerminated}{Child\+Terminated}
+\item 
+class \hyperlink{classOperationFailed}{Operation\+Failed}
+\item 
+class \hyperlink{classSegmentDescriptor}{Segment\+Descriptor$<$ S\+Z $>$}
+\item 
+class \hyperlink{classChannel}{Channel$<$ S\+Z $>$}
+\item 
+class \hyperlink{classSegment}{Segment$<$ S\+Z $>$}
+\item 
+class \hyperlink{classSegmentDescriptor}{Segment\+Descriptor$<$ S\+Z $>$}
+\item 
+class \hyperlink{classStub}{Stub$<$ S\+Z $>$}
+\item 
+class \hyperlink{classBaseProxy}{Base\+Proxy}
+\item 
+class \hyperlink{classAbstractProxy}{Abstract\+Proxy$<$ R\+E\+Q, S\+Z $>$}
+\item 
+class \hyperlink{classProxyDirect}{Proxy\+Direct$<$ R\+E\+Q, S\+Z, S\+E\+R\+V $>$}
+\item 
+class \hyperlink{classProxySO}{Proxy\+S\+O$<$ R\+E\+Q, S\+Z $>$}
+\item 
+class \hyperlink{classProxy}{Proxy$<$ R\+E\+Q, S\+Z, S\+E\+R\+V $>$}
+\end{DoxyCompactItemize}
+\subsection*{Macros}
+\begin{DoxyCompactItemize}
+\item 
+\#define \hyperlink{proxy_8hpp_a7d467c1d283fdfa1f2081ba1e0d01b6e}{P\+A\+G\+E\+\_\+\+S\+I\+ZE}~4096
+\item 
+\#define \hyperlink{proxy_8hpp_ab7ef411847b693e526afebd2891a96e5}{C\+H\+A\+N\+\_\+\+S\+I\+ZE}~4096
+\item 
+\#define \hyperlink{proxy_8hpp_ac97a6b877f67d3955003a0f410674d10}{P\+R\+O\+X\+Y\+\_\+\+L\+OG}(c)~std\+::cerr
+\end{DoxyCompactItemize}
+\subsection*{Enumerations}
+\begin{DoxyCompactItemize}
+\item 
+enum \hyperlink{proxy_8hpp_afebd7ebbad7f3100ab6bf934c5782c35}{D\+C\+O\+DE} \{ \hyperlink{proxy_8hpp_afebd7ebbad7f3100ab6bf934c5782c35a7b9ac307be3862f601f7a65c1c69f4d1}{k\+D\+Code\+\_\+\+Init}, 
+\hyperlink{proxy_8hpp_afebd7ebbad7f3100ab6bf934c5782c35a2f1ade63ec79f35261d2df70e2312681}{k\+D\+Code\+\_\+\+Limit}, 
+\hyperlink{proxy_8hpp_afebd7ebbad7f3100ab6bf934c5782c35aeb7819c435f1fb1e6e7bc083a05a91d3}{k\+D\+Code\+\_\+\+Shutdown}, 
+\hyperlink{proxy_8hpp_afebd7ebbad7f3100ab6bf934c5782c35aa8caee722ca6ce827ce021a9e82550f2}{k\+D\+Code\+\_\+\+Task}
+ \}
+\item 
+enum \hyperlink{proxy_8hpp_abdf990fbe51b4c9d3fdcc2fc3c6f9219}{Channel\+Status} \{ \hyperlink{proxy_8hpp_abdf990fbe51b4c9d3fdcc2fc3c6f9219a7fb3bf49ba349ca1a266be41df447b5b}{k\+Open}, 
+\hyperlink{proxy_8hpp_abdf990fbe51b4c9d3fdcc2fc3c6f9219a44be8f61450ed22be5adcc881a95570f}{k\+Closed}
+ \}
+\item 
+enum \hyperlink{proxy_8hpp_a249fda9ad200a554304ecf8de90d6877}{Channel\+Side} \{ \hyperlink{proxy_8hpp_a249fda9ad200a554304ecf8de90d6877a9c4b0fadea329894df39608542f6d656}{k\+Parent}, 
+\hyperlink{proxy_8hpp_a249fda9ad200a554304ecf8de90d6877a6ea35dfa8911c238573f5ca06db2e497}{k\+Child}
+ \}
+\end{DoxyCompactItemize}
+\subsection*{Functions}
+\begin{DoxyCompactItemize}
+\item 
+{\footnotesize template$<$typename Tuple , std\+::size\+\_\+t ... Is$>$ }\\auto \hyperlink{proxy_8hpp_ae5e7ef9b08c7340386e7eccab535c7f0}{pop\+\_\+front\+\_\+impl} (const Tuple \&tuple, std\+::index\+\_\+sequence$<$ Is... $>$)
+\item 
+{\footnotesize template$<$typename Tuple $>$ }\\auto \hyperlink{proxy_8hpp_a6ba8a69fe5dfb69975740463e80ce89b}{pop\+\_\+front} (const Tuple \&tuple)
+\item 
+void \hyperlink{proxy_8hpp_a4f31a6fd48ee5d4579ae4aaaa3cae285}{sig\+\_\+handler} (int signo)
+\end{DoxyCompactItemize}
+\subsection*{Variables}
+\begin{DoxyCompactItemize}
+\item 
+constexpr int \hyperlink{proxy_8hpp_a8b43c81ee7b8a4288c1cc31aad967e7d}{k\+S\+H\+M\+Alignment} = 8
+\item 
+bool \hyperlink{proxy_8hpp_afc2f556ffb367cbd8559aa26d9baa913}{parent\+\_\+terminated} = false
+\item 
+bool \hyperlink{proxy_8hpp_a0fa3e25df0e6e54f52f9aea616c50d3b}{child\+\_\+terminated} = false
+\item 
+constexpr uint32\+\_\+t \hyperlink{proxy_8hpp_af735db148c9e9f49d4feb7a4f5271b7a}{k\+Segment\+Magic} = 0xc7390fbc
+\end{DoxyCompactItemize}
+
+
+\subsection{Macro Definition Documentation}
+\mbox{\Hypertarget{proxy_8hpp_ab7ef411847b693e526afebd2891a96e5}\label{proxy_8hpp_ab7ef411847b693e526afebd2891a96e5}} 
+\index{proxy.\+hpp@{proxy.\+hpp}!C\+H\+A\+N\+\_\+\+S\+I\+ZE@{C\+H\+A\+N\+\_\+\+S\+I\+ZE}}
+\index{C\+H\+A\+N\+\_\+\+S\+I\+ZE@{C\+H\+A\+N\+\_\+\+S\+I\+ZE}!proxy.\+hpp@{proxy.\+hpp}}
+\subsubsection{\texorpdfstring{C\+H\+A\+N\+\_\+\+S\+I\+ZE}{CHAN\_SIZE}}
+{\footnotesize\ttfamily \#define C\+H\+A\+N\+\_\+\+S\+I\+ZE~4096}
+
+\mbox{\Hypertarget{proxy_8hpp_a7d467c1d283fdfa1f2081ba1e0d01b6e}\label{proxy_8hpp_a7d467c1d283fdfa1f2081ba1e0d01b6e}} 
+\index{proxy.\+hpp@{proxy.\+hpp}!P\+A\+G\+E\+\_\+\+S\+I\+ZE@{P\+A\+G\+E\+\_\+\+S\+I\+ZE}}
+\index{P\+A\+G\+E\+\_\+\+S\+I\+ZE@{P\+A\+G\+E\+\_\+\+S\+I\+ZE}!proxy.\+hpp@{proxy.\+hpp}}
+\subsubsection{\texorpdfstring{P\+A\+G\+E\+\_\+\+S\+I\+ZE}{PAGE\_SIZE}}
+{\footnotesize\ttfamily \#define P\+A\+G\+E\+\_\+\+S\+I\+ZE~4096}
+
+\mbox{\Hypertarget{proxy_8hpp_ac97a6b877f67d3955003a0f410674d10}\label{proxy_8hpp_ac97a6b877f67d3955003a0f410674d10}} 
+\index{proxy.\+hpp@{proxy.\+hpp}!P\+R\+O\+X\+Y\+\_\+\+L\+OG@{P\+R\+O\+X\+Y\+\_\+\+L\+OG}}
+\index{P\+R\+O\+X\+Y\+\_\+\+L\+OG@{P\+R\+O\+X\+Y\+\_\+\+L\+OG}!proxy.\+hpp@{proxy.\+hpp}}
+\subsubsection{\texorpdfstring{P\+R\+O\+X\+Y\+\_\+\+L\+OG}{PROXY\_LOG}}
+{\footnotesize\ttfamily \#define P\+R\+O\+X\+Y\+\_\+\+L\+OG(\begin{DoxyParamCaption}\item[{}]{c }\end{DoxyParamCaption})~std\+::cerr}
+
+
+
+\subsection{Enumeration Type Documentation}
+\mbox{\Hypertarget{proxy_8hpp_a249fda9ad200a554304ecf8de90d6877}\label{proxy_8hpp_a249fda9ad200a554304ecf8de90d6877}} 
+\index{proxy.\+hpp@{proxy.\+hpp}!Channel\+Side@{Channel\+Side}}
+\index{Channel\+Side@{Channel\+Side}!proxy.\+hpp@{proxy.\+hpp}}
+\subsubsection{\texorpdfstring{Channel\+Side}{ChannelSide}}
+{\footnotesize\ttfamily enum \hyperlink{proxy_8hpp_a249fda9ad200a554304ecf8de90d6877}{Channel\+Side}}
+
+\begin{DoxyEnumFields}{Enumerator}
+\raisebox{\heightof{T}}[0pt][0pt]{\index{k\+Parent@{k\+Parent}!proxy.\+hpp@{proxy.\+hpp}}\index{proxy.\+hpp@{proxy.\+hpp}!k\+Parent@{k\+Parent}}}\mbox{\Hypertarget{proxy_8hpp_a249fda9ad200a554304ecf8de90d6877a9c4b0fadea329894df39608542f6d656}\label{proxy_8hpp_a249fda9ad200a554304ecf8de90d6877a9c4b0fadea329894df39608542f6d656}} 
+k\+Parent&\\
+\hline
+
+\raisebox{\heightof{T}}[0pt][0pt]{\index{k\+Child@{k\+Child}!proxy.\+hpp@{proxy.\+hpp}}\index{proxy.\+hpp@{proxy.\+hpp}!k\+Child@{k\+Child}}}\mbox{\Hypertarget{proxy_8hpp_a249fda9ad200a554304ecf8de90d6877a6ea35dfa8911c238573f5ca06db2e497}\label{proxy_8hpp_a249fda9ad200a554304ecf8de90d6877a6ea35dfa8911c238573f5ca06db2e497}} 
+k\+Child&\\
+\hline
+
+\end{DoxyEnumFields}
+\mbox{\Hypertarget{proxy_8hpp_abdf990fbe51b4c9d3fdcc2fc3c6f9219}\label{proxy_8hpp_abdf990fbe51b4c9d3fdcc2fc3c6f9219}} 
+\index{proxy.\+hpp@{proxy.\+hpp}!Channel\+Status@{Channel\+Status}}
+\index{Channel\+Status@{Channel\+Status}!proxy.\+hpp@{proxy.\+hpp}}
+\subsubsection{\texorpdfstring{Channel\+Status}{ChannelStatus}}
+{\footnotesize\ttfamily enum \hyperlink{proxy_8hpp_abdf990fbe51b4c9d3fdcc2fc3c6f9219}{Channel\+Status}}
+
+\begin{DoxyEnumFields}{Enumerator}
+\raisebox{\heightof{T}}[0pt][0pt]{\index{k\+Open@{k\+Open}!proxy.\+hpp@{proxy.\+hpp}}\index{proxy.\+hpp@{proxy.\+hpp}!k\+Open@{k\+Open}}}\mbox{\Hypertarget{proxy_8hpp_abdf990fbe51b4c9d3fdcc2fc3c6f9219a7fb3bf49ba349ca1a266be41df447b5b}\label{proxy_8hpp_abdf990fbe51b4c9d3fdcc2fc3c6f9219a7fb3bf49ba349ca1a266be41df447b5b}} 
+k\+Open&\\
+\hline
+
+\raisebox{\heightof{T}}[0pt][0pt]{\index{k\+Closed@{k\+Closed}!proxy.\+hpp@{proxy.\+hpp}}\index{proxy.\+hpp@{proxy.\+hpp}!k\+Closed@{k\+Closed}}}\mbox{\Hypertarget{proxy_8hpp_abdf990fbe51b4c9d3fdcc2fc3c6f9219a44be8f61450ed22be5adcc881a95570f}\label{proxy_8hpp_abdf990fbe51b4c9d3fdcc2fc3c6f9219a44be8f61450ed22be5adcc881a95570f}} 
+k\+Closed&\\
+\hline
+
+\end{DoxyEnumFields}
+\mbox{\Hypertarget{proxy_8hpp_afebd7ebbad7f3100ab6bf934c5782c35}\label{proxy_8hpp_afebd7ebbad7f3100ab6bf934c5782c35}} 
+\index{proxy.\+hpp@{proxy.\+hpp}!D\+C\+O\+DE@{D\+C\+O\+DE}}
+\index{D\+C\+O\+DE@{D\+C\+O\+DE}!proxy.\+hpp@{proxy.\+hpp}}
+\subsubsection{\texorpdfstring{D\+C\+O\+DE}{DCODE}}
+{\footnotesize\ttfamily enum \hyperlink{proxy_8hpp_afebd7ebbad7f3100ab6bf934c5782c35}{D\+C\+O\+DE}}
+
+\begin{DoxyEnumFields}{Enumerator}
+\raisebox{\heightof{T}}[0pt][0pt]{\index{k\+D\+Code\+\_\+\+Init@{k\+D\+Code\+\_\+\+Init}!proxy.\+hpp@{proxy.\+hpp}}\index{proxy.\+hpp@{proxy.\+hpp}!k\+D\+Code\+\_\+\+Init@{k\+D\+Code\+\_\+\+Init}}}\mbox{\Hypertarget{proxy_8hpp_afebd7ebbad7f3100ab6bf934c5782c35a7b9ac307be3862f601f7a65c1c69f4d1}\label{proxy_8hpp_afebd7ebbad7f3100ab6bf934c5782c35a7b9ac307be3862f601f7a65c1c69f4d1}} 
+k\+D\+Code\+\_\+\+Init&\\
+\hline
+
+\raisebox{\heightof{T}}[0pt][0pt]{\index{k\+D\+Code\+\_\+\+Limit@{k\+D\+Code\+\_\+\+Limit}!proxy.\+hpp@{proxy.\+hpp}}\index{proxy.\+hpp@{proxy.\+hpp}!k\+D\+Code\+\_\+\+Limit@{k\+D\+Code\+\_\+\+Limit}}}\mbox{\Hypertarget{proxy_8hpp_afebd7ebbad7f3100ab6bf934c5782c35a2f1ade63ec79f35261d2df70e2312681}\label{proxy_8hpp_afebd7ebbad7f3100ab6bf934c5782c35a2f1ade63ec79f35261d2df70e2312681}} 
+k\+D\+Code\+\_\+\+Limit&\\
+\hline
+
+\raisebox{\heightof{T}}[0pt][0pt]{\index{k\+D\+Code\+\_\+\+Shutdown@{k\+D\+Code\+\_\+\+Shutdown}!proxy.\+hpp@{proxy.\+hpp}}\index{proxy.\+hpp@{proxy.\+hpp}!k\+D\+Code\+\_\+\+Shutdown@{k\+D\+Code\+\_\+\+Shutdown}}}\mbox{\Hypertarget{proxy_8hpp_afebd7ebbad7f3100ab6bf934c5782c35aeb7819c435f1fb1e6e7bc083a05a91d3}\label{proxy_8hpp_afebd7ebbad7f3100ab6bf934c5782c35aeb7819c435f1fb1e6e7bc083a05a91d3}} 
+k\+D\+Code\+\_\+\+Shutdown&\\
+\hline
+
+\raisebox{\heightof{T}}[0pt][0pt]{\index{k\+D\+Code\+\_\+\+Task@{k\+D\+Code\+\_\+\+Task}!proxy.\+hpp@{proxy.\+hpp}}\index{proxy.\+hpp@{proxy.\+hpp}!k\+D\+Code\+\_\+\+Task@{k\+D\+Code\+\_\+\+Task}}}\mbox{\Hypertarget{proxy_8hpp_afebd7ebbad7f3100ab6bf934c5782c35aa8caee722ca6ce827ce021a9e82550f2}\label{proxy_8hpp_afebd7ebbad7f3100ab6bf934c5782c35aa8caee722ca6ce827ce021a9e82550f2}} 
+k\+D\+Code\+\_\+\+Task&\\
+\hline
+
+\end{DoxyEnumFields}
+
+
+\subsection{Function Documentation}
+\mbox{\Hypertarget{proxy_8hpp_a6ba8a69fe5dfb69975740463e80ce89b}\label{proxy_8hpp_a6ba8a69fe5dfb69975740463e80ce89b}} 
+\index{proxy.\+hpp@{proxy.\+hpp}!pop\+\_\+front@{pop\+\_\+front}}
+\index{pop\+\_\+front@{pop\+\_\+front}!proxy.\+hpp@{proxy.\+hpp}}
+\subsubsection{\texorpdfstring{pop\+\_\+front()}{pop\_front()}}
+{\footnotesize\ttfamily template$<$typename Tuple $>$ \\
+auto pop\+\_\+front (\begin{DoxyParamCaption}\item[{const Tuple \&}]{tuple }\end{DoxyParamCaption})}
+
+Here is the call graph for this function\+:
+\nopagebreak
+\begin{figure}[H]
+\begin{center}
+\leavevmode
+\includegraphics[width=253pt]{proxy_8hpp_a6ba8a69fe5dfb69975740463e80ce89b_cgraph}
+\end{center}
+\end{figure}
+Here is the caller graph for this function\+:
+\nopagebreak
+\begin{figure}[H]
+\begin{center}
+\leavevmode
+\includegraphics[width=248pt]{proxy_8hpp_a6ba8a69fe5dfb69975740463e80ce89b_icgraph}
+\end{center}
+\end{figure}
+\mbox{\Hypertarget{proxy_8hpp_ae5e7ef9b08c7340386e7eccab535c7f0}\label{proxy_8hpp_ae5e7ef9b08c7340386e7eccab535c7f0}} 
+\index{proxy.\+hpp@{proxy.\+hpp}!pop\+\_\+front\+\_\+impl@{pop\+\_\+front\+\_\+impl}}
+\index{pop\+\_\+front\+\_\+impl@{pop\+\_\+front\+\_\+impl}!proxy.\+hpp@{proxy.\+hpp}}
+\subsubsection{\texorpdfstring{pop\+\_\+front\+\_\+impl()}{pop\_front\_impl()}}
+{\footnotesize\ttfamily template$<$typename Tuple , std\+::size\+\_\+t ... Is$>$ \\
+auto pop\+\_\+front\+\_\+impl (\begin{DoxyParamCaption}\item[{const Tuple \&}]{tuple,  }\item[{std\+::index\+\_\+sequence$<$ Is... $>$}]{ }\end{DoxyParamCaption})}
+
+Here is the caller graph for this function\+:
+\nopagebreak
+\begin{figure}[H]
+\begin{center}
+\leavevmode
+\includegraphics[width=350pt]{proxy_8hpp_ae5e7ef9b08c7340386e7eccab535c7f0_icgraph}
+\end{center}
+\end{figure}
+\mbox{\Hypertarget{proxy_8hpp_a4f31a6fd48ee5d4579ae4aaaa3cae285}\label{proxy_8hpp_a4f31a6fd48ee5d4579ae4aaaa3cae285}} 
+\index{proxy.\+hpp@{proxy.\+hpp}!sig\+\_\+handler@{sig\+\_\+handler}}
+\index{sig\+\_\+handler@{sig\+\_\+handler}!proxy.\+hpp@{proxy.\+hpp}}
+\subsubsection{\texorpdfstring{sig\+\_\+handler()}{sig\_handler()}}
+{\footnotesize\ttfamily void sig\+\_\+handler (\begin{DoxyParamCaption}\item[{int}]{signo }\end{DoxyParamCaption})}
+
+Here is the caller graph for this function\+:
+\nopagebreak
+\begin{figure}[H]
+\begin{center}
+\leavevmode
+\includegraphics[width=320pt]{proxy_8hpp_a4f31a6fd48ee5d4579ae4aaaa3cae285_icgraph}
+\end{center}
+\end{figure}
+
+
+\subsection{Variable Documentation}
+\mbox{\Hypertarget{proxy_8hpp_a0fa3e25df0e6e54f52f9aea616c50d3b}\label{proxy_8hpp_a0fa3e25df0e6e54f52f9aea616c50d3b}} 
+\index{proxy.\+hpp@{proxy.\+hpp}!child\+\_\+terminated@{child\+\_\+terminated}}
+\index{child\+\_\+terminated@{child\+\_\+terminated}!proxy.\+hpp@{proxy.\+hpp}}
+\subsubsection{\texorpdfstring{child\+\_\+terminated}{child\_terminated}}
+{\footnotesize\ttfamily bool child\+\_\+terminated = false}
+
+\mbox{\Hypertarget{proxy_8hpp_af735db148c9e9f49d4feb7a4f5271b7a}\label{proxy_8hpp_af735db148c9e9f49d4feb7a4f5271b7a}} 
+\index{proxy.\+hpp@{proxy.\+hpp}!k\+Segment\+Magic@{k\+Segment\+Magic}}
+\index{k\+Segment\+Magic@{k\+Segment\+Magic}!proxy.\+hpp@{proxy.\+hpp}}
+\subsubsection{\texorpdfstring{k\+Segment\+Magic}{kSegmentMagic}}
+{\footnotesize\ttfamily constexpr uint32\+\_\+t k\+Segment\+Magic = 0xc7390fbc}
+
+\mbox{\Hypertarget{proxy_8hpp_a8b43c81ee7b8a4288c1cc31aad967e7d}\label{proxy_8hpp_a8b43c81ee7b8a4288c1cc31aad967e7d}} 
+\index{proxy.\+hpp@{proxy.\+hpp}!k\+S\+H\+M\+Alignment@{k\+S\+H\+M\+Alignment}}
+\index{k\+S\+H\+M\+Alignment@{k\+S\+H\+M\+Alignment}!proxy.\+hpp@{proxy.\+hpp}}
+\subsubsection{\texorpdfstring{k\+S\+H\+M\+Alignment}{kSHMAlignment}}
+{\footnotesize\ttfamily constexpr int k\+S\+H\+M\+Alignment = 8}
+
+\mbox{\Hypertarget{proxy_8hpp_afc2f556ffb367cbd8559aa26d9baa913}\label{proxy_8hpp_afc2f556ffb367cbd8559aa26d9baa913}} 
+\index{proxy.\+hpp@{proxy.\+hpp}!parent\+\_\+terminated@{parent\+\_\+terminated}}
+\index{parent\+\_\+terminated@{parent\+\_\+terminated}!proxy.\+hpp@{proxy.\+hpp}}
+\subsubsection{\texorpdfstring{parent\+\_\+terminated}{parent\_terminated}}
+{\footnotesize\ttfamily bool parent\+\_\+terminated = false}
+

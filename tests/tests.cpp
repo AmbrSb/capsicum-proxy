@@ -35,8 +35,7 @@ public:
 #define _(n)    std::get<n>(tup)
 #define _res   _(0)
 
-    Service()
-    {
+    Service() {
 
     }
 

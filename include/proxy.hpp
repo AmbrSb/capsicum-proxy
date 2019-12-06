@@ -78,7 +78,7 @@ public:
             PROXY_LOG(ERROR) << "Cannot create shared memory for channel";
     }
 
-    void* GetBase()
+    operator void* ()
     {
         return base_;
     }
@@ -100,7 +100,8 @@ public:
     Segment()
         : turn_{kParent},
           send_{SZ},
-          recv_{SZ}
+          recv_{SZ},
+          chan_sz_{SZ}
     {
         pthread_mutexattr_t attr;
         pthread_mutexattr_init(&attr);
@@ -114,6 +115,78 @@ public:
     __always_inline
     bool ChildTurn() { return !ParentTurn(); }
 
+    template <int N, typename TUP>
+    void
+    ExtractElem(TUP& instance, void*& recv) {
+        if constexpr (std::tuple_size<TUP>::value >= N + 1)
+        {
+            using TYPE = std::tuple_element_t<N, TUP>;
+            std::size_t offset;
+            if constexpr (std::is_same<TYPE, std::string>::value) {
+                char* item = static_cast<char*>(recv);
+                std::cerr << "got paramXXX: " << item << std::endl;
+                std::string tmp {item};
+                std::get<N>(instance) = tmp;
+                recv += tmp.size();
+                chan_sz_ -= tmp.size();
+                auto ret = std::align(kSHMAlignment, 1, recv, chan_sz_);
+                if (ret == nullptr)
+                    throw 44;
+            } else {
+                std::add_pointer_t<TYPE> p0;
+                auto item = static_cast<decltype(p0)>(recv);
+                std::cerr << "got paramYYY: " << *item << std::endl;
+                std::get<N>(instance) = *item;
+                recv += sizeof(item);
+                chan_sz_ -= sizeof(item);
+                auto ret = std::align(kSHMAlignment, 1, recv, chan_sz_);
+                if (ret == nullptr)
+                    throw 55;
+            }
+        }
+    }
+
+    template <typename T>
+    auto
+    ExtractParams() {
+        void* recv = send_;
+        T tup;
+        static_assert(std::tuple_size<T>::value <= 17);
+        ExtractElem<1> (tup, recv);
+        ExtractElem<2> (tup, recv);
+        ExtractElem<3> (tup, recv);
+        ExtractElem<4> (tup, recv);
+        ExtractElem<5> (tup, recv);
+        ExtractElem<6> (tup, recv);
+        ExtractElem<7> (tup, recv);
+        ExtractElem<8> (tup, recv);
+        ExtractElem<9> (tup, recv);
+        ExtractElem<10>(tup, recv);
+        ExtractElem<11>(tup, recv);
+        ExtractElem<12>(tup, recv);
+        ExtractElem<13>(tup, recv);
+        ExtractElem<14>(tup, recv);
+        ExtractElem<15>(tup, recv);
+        ExtractElem<16>(tup, recv);
+        return tup;
+    }
+
+    template <typename T>
+    void
+    PutResult(T& tup) {
+        void* snd = recv_;
+        using TYPE = std::tuple_element_t<0, T>;
+        std::size_t offset;
+        if constexpr (std::is_same<TYPE, std::string>::value) {
+            char* result = static_cast<char*>(snd);
+            strcpy(result, std::get<0>(tup).c_str());
+        } else {
+            std::add_pointer_t<TYPE> result;
+            result = static_cast<decltype(result)>(snd);
+            *result = std::get<0>(tup);
+        }
+    }
+
 private:
     // XXX: use a ring queue so that we can have multiple requests queued at the same time.
     volatile ChannelSide turn_;
@@ -121,11 +194,26 @@ private:
     Channel<SZ>          send_;
     Channel<SZ>          recv_;
     uint32_t             magic_ = kSegmentMagic;
+    std::size_t          chan_sz_;
 };
 
 template<std::size_t SZ>
 class SegmentDescriptor {
 public:
+    template <typename T>
+    auto
+    ExtractParams() {
+        Wait();
+        return segment_.template ExtractParams<T>();
+    }
+
+    template <typename T>
+    void
+    PutResult(T& tup) {
+        segment_.template PutResult<T>(tup);
+        Switch();
+    }
+
     Channel<SZ>& GetSendChannel() const
     {
         return ((side_ == kParent) ? segment_.send_ : segment_.recv_);
@@ -230,7 +318,7 @@ public:
     }
 
 private:
-    ChannelSide side_;
+    ChannelSide     side_;
     Segment<SZ>&    segment_;
 };
 
@@ -238,14 +326,16 @@ private:
 template<std::size_t SZ>
 class Stub {
 public:
-    Stub()
-        : chan_sz_{SZ}
+    Stub(std::shared_ptr<SegmentDescriptor<SZ>> seg)
+        : chan_sz_{SZ},
+          segd_{seg}
     { }
 
     template <typename... Args>
     void
-    CreateRequest(void* base, Args... args) {
-        Unroll(base, args...);
+    SendRequest(Args... args) {
+        Unroll(segd_->GetSendChannel(), args...);
+        segd_->Switch();
     }
 
     template <typename T, typename... Args>
@@ -278,7 +368,14 @@ public:
 
     template <typename R>
     R
-    ParseResult(void* base) {
+    ReadResult() {
+        void* base = segd_->GetRecvChannel();
+        try {
+            segd_->Wait();
+        } catch (ChildTerminated& cte) {
+            std::cerr << "Child died" << std::endl;
+            throw OperationFailed{};
+        }
         if constexpr (std::is_same<R, std::string>::value) {
             char* result = static_cast<char*>(base);
             return std::string{result};
@@ -290,6 +387,7 @@ public:
 
 private:
     std::size_t chan_sz_;
+    std::shared_ptr<SegmentDescriptor<SZ>> segd_;
 };
 
 extern "C"
@@ -310,8 +408,7 @@ protected:
     using RET = std::tuple_element_t<0, REQ>;
 
     AbstractProxy()
-        : stub_{},
-          chan_sz_{SZ}
+        : chan_sz_{SZ}
     {
         this->Init();
     }
@@ -334,7 +431,8 @@ protected:
             side_ = kChild;
         } else if (pid > 0) {
             InstallSignalHandlers();
-            segd_ = std::make_unique<SegmentDescriptor<SZ>>(kParent, *seg);
+            segd_ = std::make_shared<SegmentDescriptor<SZ>>(kParent, *seg);
+            stub_ = std::make_unique<Stub<SZ>>(segd_);
             side_ = kParent;
         } else
             PROXY_LOG(ERROR) << "fork() failed: ";
@@ -356,15 +454,13 @@ protected:
     {
         while (true) {
             try {
-                this->segd_->Wait();
+                REQ ins = this->segd_->template ExtractParams<REQ>();
+                Do(ins);
+                this->segd_->PutResult(ins);
             } catch (ParentTerminated& pte) {
                 std::cerr << "Parent died" << std::endl;
                 exit(1);
             }
-            REQ ins = this->template ExtractParams<REQ>(this->segd_->GetRecvChannel().GetBase());
-            Do(ins);
-            this->PutResult(ins, this->segd_->GetSendChannel().GetBase());
-            this->segd_->Switch();
         }
         __builtin_unreachable();
     }
@@ -375,98 +471,19 @@ protected:
             StartServiceLoop();
     }
 
-    template <int N, typename TUP>
-    void
-    ExtractElem(TUP& instance, void*& recv) {
-        if constexpr (std::tuple_size<TUP>::value >= N + 1)
-        {
-            using TYPE = std::tuple_element_t<N, TUP>;
-            std::size_t offset;
-            if constexpr (std::is_same<TYPE, std::string>::value) {
-                char* item = static_cast<char*>(recv);
-                std::cerr << "got paramXXX: " << item << std::endl;
-                std::string tmp {item};
-                std::get<N>(instance) = tmp;
-                recv += tmp.size();
-                chan_sz_ -= tmp.size();
-                auto ret = std::align(kSHMAlignment, 1, recv, chan_sz_);
-                if (ret == nullptr)
-                    throw 44;
-            } else {
-                std::add_pointer_t<TYPE> p0;
-                auto item = static_cast<decltype(p0)>(recv);
-                std::cerr << "got paramYYY: " << *item << std::endl;
-                std::get<N>(instance) = *item;
-                recv += sizeof(item);
-                chan_sz_ -= sizeof(item);
-                auto ret = std::align(kSHMAlignment, 1, recv, chan_sz_);
-                if (ret == nullptr)
-                    throw 55;
-            }
-        }
-    }
-
-    template <typename T>
-    auto
-    ExtractParams(void* recv) {
-        T tup;
-        static_assert(std::tuple_size<T>::value <= 17);
-        ExtractElem<1> (tup, recv);
-        ExtractElem<2> (tup, recv);
-        ExtractElem<3> (tup, recv);
-        ExtractElem<4> (tup, recv);
-        ExtractElem<5> (tup, recv);
-        ExtractElem<6> (tup, recv);
-        ExtractElem<7> (tup, recv);
-        ExtractElem<8> (tup, recv);
-        ExtractElem<9> (tup, recv);
-        ExtractElem<10>(tup, recv);
-        ExtractElem<11>(tup, recv);
-        ExtractElem<12>(tup, recv);
-        ExtractElem<13>(tup, recv);
-        ExtractElem<14>(tup, recv);
-        ExtractElem<15>(tup, recv);
-        ExtractElem<16>(tup, recv);
-        return tup;
-    }
-
-    template <typename T>
-    void
-    PutResult(T& tup, void* snd) {
-        using TYPE = std::tuple_element_t<0, T>;
-        std::size_t offset;
-        if constexpr (std::is_same<TYPE, std::string>::value) {
-            char* result = static_cast<char*>(snd);
-            strcpy(result, std::get<0>(tup).c_str());
-        } else {
-            std::add_pointer_t<TYPE> result;
-            result = static_cast<decltype(result)>(snd);
-            *result = std::get<0>(tup);
-        }
-    }
-
 public:
     template <typename... Args>
     RET
     Execute(Args... args)
     {
-        void* base = segd_->GetSendChannel().GetBase();
-        stub_.CreateRequest(base, args...);
-        segd_->Switch();
-        try {
-            segd_->Wait();
-        } catch (ChildTerminated& cte) {
-            std::cerr << "Child died" << std::endl;
-            throw OperationFailed{};
-        }
-        RET result = stub_.template ParseResult<RET>(segd_->GetRecvChannel().GetBase());
+        stub_->SendRequest(args...);
+        RET result = stub_->template ReadResult<RET>();
         return result;
     }
 
-
 protected:
-    std::unique_ptr<SegmentDescriptor<SZ>> segd_;
-    Stub<SZ> stub_;
+    std::shared_ptr<SegmentDescriptor<SZ>> segd_;
+    std::unique_ptr<Stub<SZ>> stub_;
     void* handle_;
     std::size_t chan_sz_;
     ChannelSide side_;

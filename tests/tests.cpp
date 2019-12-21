@@ -34,6 +34,10 @@ using Ret3 = std::string;
 using Req4 = std::tuple<std::string, int, int>;
 using Ret4 = int;
 
+using Req5 = std::tuple<int>;
+using Ret5 = int;
+
+
 class Service {
 public:
 // XXX: use user defined literals instead of this macro
@@ -62,34 +66,58 @@ public:
         return res;
     }
 
+    Ret5
+    Handle(Req5& tup) {
+        auto res = 1 + _(0);
+        return res;
+    }
+
 #undef _
 #undef _res
 };
 
+using namespace capsiproxy;
+
 TEST(ProxyTest, NumericTest) {
+    auto p = Proxy<4096, Service>::Build();
+    auto result = p.Execute<int>(16);
+    ASSERT_EQ(result, 17);
+    auto result2 = p.Execute<double>(7, 19, 23);
+    ASSERT_EQ(result2, 49.78);
+    p.Shutdown<double>(0, 0, 0);
+}
+
+TEST(ProxyTest, NumericTest2) {
     auto p = Proxy<4096, Service>::Build();
     auto result = p.Execute<double>(1, 10, 34);
     ASSERT_EQ(result, 45.78);
-    result = p.Execute<double>(7, 19, 23);
-    ASSERT_EQ(result, 49.78);
+    result = p.Execute<double>(17, 29, 33);
+    ASSERT_EQ(result, 79.78);
+    p.Shutdown<double>(0, 0, 0);
 }
 
 TEST(ProxyTest, StringTest) {
     auto p = Proxy<4096, Service>::Build();
     auto result = p.Execute<std::size_t>(9, "hello"s);
     ASSERT_EQ(result, 14);
+    p.Shutdown<std::size_t>(0, ""s);
 }
 
 TEST(ProxyTest, StringReturnTest) {
     auto p = Proxy<4096, Service>::Build();
     auto result = p.Execute<std::string>("hello_2"s);
     ASSERT_STREQ(result.c_str(), "return:hello_2");
+    // p.Stop<std::string>(""s);
+    p.Shutdown<std::string>(""s);
 }
 
 TEST(ProxyDLOAPITest, NumericTest) {
     auto p = Proxy<4096>::Build("/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/libtest.so");
     auto result = p.Execute<int>("add"s, 20, 30);
     ASSERT_EQ(result, 50);
+    result = p.Execute<int>("add"s, 163, 9);
+    ASSERT_EQ(result, 172);
+    p.Shutdown<int>(""s, 0, 0);
 }
 
 }

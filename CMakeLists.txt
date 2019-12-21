@@ -59,6 +59,7 @@ target_link_libraries(${PROJECT_NAME}_test
                       glog
                       gtest_main
                       dl
+                      rt
                       )
 add_test(ProxyTest ${PROJECT_NAME}_test)
 

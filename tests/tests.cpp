@@ -103,12 +103,26 @@ TEST(ProxyTest, StringTest) {
     p.Shutdown<std::size_t>(0, ""s);
 }
 
+TEST(ProxyTest, OperationAfterShutdownShouldThrow) {
+    auto p = Proxy<4096, Service>::Build();
+    auto result = p.Execute<std::size_t>(9, "hello"s);
+    ASSERT_EQ(result, 14);
+    p.Shutdown<std::size_t>(0, ""s);
+    EXPECT_THROW(p.Execute<std::size_t>(1, "a"s),
+                 capsiproxy::InvalidProxyState);
+    EXPECT_THROW(p.Shutdown<std::size_t>(1, "a"s),
+                 capsiproxy::InvalidProxyState);
+    EXPECT_THROW(p.Stop<std::size_t>(1, "a"s),
+                 capsiproxy::InvalidProxyState);
+}
+
 TEST(ProxyTest, StringReturnTest) {
     auto p = Proxy<4096, Service>::Build();
     auto result = p.Execute<std::string>("hello_2"s);
     ASSERT_STREQ(result.c_str(), "return:hello_2");
-    // p.Stop<std::string>(""s);
-    p.Shutdown<std::string>(""s);
+    p.Stop<std::string>(""s);
+    auto result2 = p.Execute<std::string>("hello_3"s);
+    ASSERT_STREQ(result2.c_str(), "return:hello_3");
 }
 
 TEST(ProxyDLOAPITest, NumericTest) {

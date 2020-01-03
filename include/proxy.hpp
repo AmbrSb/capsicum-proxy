@@ -97,10 +97,17 @@ enum ChannelSide {
 
 constexpr uint32_t kSegmentMagic = 0xc7390fbc;
 
+/**
+ * Round up x to the smallest multiple of y.
+ * @param  x: The value to be rounded up
+ * @param  y: The multiplier
+ * @retval Returns the smallest integral value that is greater than or equal to
+ * x, and is a multiple of y
+ */
 inline std::size_t
 div_round_up(int x, int y)
 {
-    return 1 + (x - 1) / y;
+    return y* (1 + (x - 1) / y);
 }
 
 template <typename Tuple, std::size_t ... Is>
@@ -116,6 +123,33 @@ auto pop_front(const Tuple& tuple)
                           std::make_index_sequence<std::tuple_size<Tuple>::value - 1>());
 }
 
+void*
+open_map_shm(char const* name, std::size_t sz, bool auto_unlink)
+{
+    int fd = shm_open(name, O_RDWR | O_CREAT, S_IRWXU);
+    if (fd == -1) {
+        PROXY_LOG(ERR) << "Cannot create shared memory for segment";
+        PROXY_LOG(ERR) << "shm_open: " << strerror(errno) << std::endl;
+    }
+    int ret = ftruncate(fd, sz);
+    if (ret == -1) {
+        PROXY_LOG(ERR) << "Cannot ftruncate shared memory for segment";
+        exit(99);
+    }
+    void* m = mmap(nullptr, sz,
+                    PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (m == MAP_FAILED)
+        PROXY_LOG(ERR) << "Cannot map shared memory for segment";
+    if (auto_unlink) {
+        ret = shm_unlink(name);
+        if (ret) {
+            PROXY_LOG(ERR) << "Cannot unlink the shared memory of segment";
+            PROXY_LOG(ERR) << "shm_unlink: " << strerror(errno) << std::endl;
+        }
+    }
+    return m;
+}
+
 template<std::size_t SZ>
 class SegmentDescriptor;
 
@@ -123,20 +157,11 @@ template <std::size_t SZ>
 class Channel {
 public:
     friend class SegmentDescriptor<SZ>;
-    Channel(std::size_t sz, std::string name)
+    Channel(std::size_t sz, std::string name, bool auto_unlink)
+        : name_{name}
     {
         PROXY_LOG(DBG) << "Creating channel - name: " << name << " size: " << sz << std::endl;
-        int fd = shm_open(name.c_str(), O_RDWR | O_CREAT, S_IRWXU);
-        if (fd == -1)
-            PROXY_LOG(ERR) << "Cannot shm_open segment shared memory." << std::endl;
-        int ret = ftruncate(fd, sz);
-        if (ret == -1)
-            PROXY_LOG(ERR) << "Cannot ftruncate segment shared memory." << std::endl;
-        base_ = mmap(nullptr, sz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-        if (base_ == MAP_FAILED)
-            PROXY_LOG(ERR) << "Cannot map shared memory for channel" << std::endl;
-        else
-            PROXY_LOG(ERR) << "Channel " << name << " opened: " << base_ << std::endl;
+        base_ = open_map_shm(name.c_str(), sz, auto_unlink);
     }
 
     ~Channel()
@@ -157,6 +182,7 @@ private:
     uint64_t      size_;
     void*         base_;
     ChannelStatus status_;
+    std::string   name_;
 #ifdef PROXY_DBG
     uint32_t      canary = 0xdeadbeaf;
 #endif
@@ -167,11 +193,11 @@ class Segment {
 public:
     friend class SegmentDescriptor<SZ>;
 
-    Segment(bool init_turn, std::size_t pagecnt)
-        : autounmap_{this, pagecnt * PAGE_SIZE},
+    Segment(bool init_turn, std::size_t memsz)
+        : autounmap_{this, memsz},
           turn_{init_turn ? kParent : turn_},
           chan_sz_{SZ},
-          pagecnt_{pagecnt}
+          memsz_{memsz}
     {
         pthread_mutexattr_t attr;
         pthread_mutexattr_init(&attr);
@@ -244,7 +270,7 @@ public:
     std::size_t
     GetSize()
     {
-        return PAGE_SIZE * pagecnt_;
+        return memsz_;
     }
     
     bool
@@ -282,7 +308,7 @@ private:
     uint32_t             magic_ = kSegmentMagic;
     std::size_t          chan_sz_;
     SegmentStatus volatile status_{kActive};
-    std::size_t pagecnt_;
+    std::size_t memsz_;
 };
 
 template<std::size_t SZ>
@@ -362,9 +388,16 @@ public:
         : side_{side},
           segment_{seg},
           child_pid_{cp},
-          send_{SZ, name + "_ch_c2s"},
-          recv_{SZ, name + "_ch_s2c"}
+        /**
+         * The named shared memory was used to establish a communication channel
+         * the client and server processes. After the channel is connected, we
+         * no longer need keep the named shared memory linked in /dev/shm.
+         * We do the unlinking on the child (server) side after opening the channels.
+         */
+          send_{SZ, name + "_ch_c2s", /*auto unlink*/ side == kChild},
+          recv_{SZ, name + "_ch_s2c", /*auto unlink*/ side == kChild}
     {
+
         GetSendChannel().status_ = kOpen;
     }
 
@@ -475,9 +508,9 @@ public:
 private:
     ChannelSide     side_;
     Segment<SZ>&    segment_;
-    pid_t child_pid_;
-    Channel<SZ>          send_;
-    Channel<SZ>          recv_;
+    pid_t           child_pid_;
+    Channel<SZ>     send_;
+    Channel<SZ>     recv_;
 };
 
 
@@ -517,17 +550,8 @@ private:
     SegmentDescriptor<SZ>& segd_;
 };
 
-// extern "C"
-// void sig_chld_handler(int signo);
 extern "C"
 void sig_livecheck_handler(int signo);
-
-// extern "C"
-// void
-// sig_chld_handler(int signo)
-// {
-//     child_terminated = true;
-// }
 
 extern "C"
 void
@@ -646,82 +670,125 @@ public:
         Command cmd;
         cmd.code = kShutDownRequest;
         PROXY_LOG(DBG) << "Going to send Shutdown request to child" << std::endl;
-        int ret = write(GetCommandClientSocket(), &cmd, sizeof(cmd));
+        int ret = write(GetCommandSocket(), &cmd, sizeof(cmd));
         if (ret == -1)
             PROXY_LOG(ERR) << "Cannot write kShutdown request";
     }
 
 protected:
 
+    /**
+     * Inform the server (child) process that it should open a new communication
+     * channel to serve a new type of function type.
+     * 
+     * @tparam SFUNC: The type of the service function to be sent to the server
+     * process.
+     * 
+     * @param  name: Name of the communication channel. The client uses this name
+     * to generate the names of the shared memory segments it has to map in its
+     * address space.
+     * 
+     * @param  service_func: The function pointer to the function the server should
+     * use to carry out the requested operations.
+     */
     template<typename SFUNC>
     void
     SendNewChannelInfo(std::string name, SFUNC service_func)
     {
         Command cmd;
+        assert(name.size() < sizeof(cmd.seg_name));
         strcpy(cmd.seg_name, name.c_str());
         cmd.service_func = reinterpret_cast<void*>(service_func);
         cmd.code = kNewChannel;
-        int ret = write(GetCommandClientSocket(), &cmd, sizeof(cmd));
+        int ret = write(GetCommandSocket(), &cmd, sizeof(cmd));
         if (ret == -1)
             PROXY_LOG(ERR) << "Cannot write kNewChannel request";
     }
 
+    /**
+     * Setup communication channels between a child and server process for a specific
+     * type of function.
+     * 
+     * @param  name: Name of the segment descriptor which can be used to generate
+     * the names of the shared memory segments that hold the segment and its related
+     * cahnnels.
+     * 
+     * @param  side: Indicates which side of the channel we are supposed to be. This
+     * is relevant, because the parent (client) is responsible for initializing the
+     * data structures residing in these shared memory areas.
+     * 
+     * @retval Returns the newly created segment descriptor.
+     */
     SegmentDescriptor<SZ>*
     OpenChannel(std::string name, ChannelSide side)
     {
-        std::size_t seg_pagecnt = div_round_up(sizeof(Segment<SZ>), PAGE_SIZE);
-        int fd = shm_open(name.c_str(), O_RDWR | O_CREAT, S_IRWXU);
-        if (fd == -1) {
-            PROXY_LOG(ERR) << "Cannot create shared memory for segment";
-            perror("shm_open");
-        }
+        /**
+         * On the child side just unlink the named shared memory, since it is
+         * not needed any more. The parent (client) must have already opened and
+         * mapped it into its address space.
+         */
+        bool auto_unlink_shm {side == kChild};
+        /**
+         * Calculate the minumum possible size for the shared memory segment.
+         */
+        std::size_t seg_memsz = div_round_up(sizeof(Segment<SZ>), PAGE_SIZE);
 
-        int ret = ftruncate(fd, SZ);
-        if (ret == -1)
-            PROXY_LOG(ERR) << "Cannot ftruncate shared memory for segment";
-
-        auto m = mmap(nullptr, seg_pagecnt,
-                    PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-        if (m == MAP_FAILED)
-            PROXY_LOG(ERR) << "Cannot map shared memory for segment";
-
-        Segment<SZ>* seg = new (m) Segment<SZ>{side == kParent, seg_pagecnt};
-
+        void* m = open_map_shm(name.c_str(), seg_memsz, auto_unlink_shm);
+        Segment<SZ>* seg = new (m) Segment<SZ>{side == kParent, seg_memsz};
         auto segd = new SegmentDescriptor<SZ>(name, side, *seg, child_pid_);
         return segd;
     }
 
+    /**
+     * The main loop of the child (server) process to receive and take action
+     * on management commands from the parent (client) process.
+     */
     void
     CommandServerLoop()
     {
         PROXY_LOG(DBG) << "Starting command loop for child." << std::endl;
         while (true) {
             auto cmd = WaitForCommand();
-            std::thread* thr;
-            SegmentDescriptor<SZ>* segd;
-            using WT = void(*)(decltype(this), SegmentDescriptor<SZ>*);
-            auto service_func = (WT)cmd->service_func;
-
             switch (cmd->code)
             {
+            /**
+             * This command shows that a function of a specific type has been
+             * invoked in the client for the first time. Thus the child process
+             * should create the related channels and thread to be able to
+             * handle requests of this type.
+             */
             case kNewChannel:
                 PROXY_LOG(DBG) << "Child: Got command: kNewChannel - segname: " << cmd->seg_name << std::endl;
+                // Extract the service function from the Command object
+                using WT = void(*)(decltype(this), SegmentDescriptor<SZ>*);
+                WT service_func;
+                service_func = reinterpret_cast<WT>(cmd->service_func);
+                // Extract the name of the segment descriptor from the Command
+                // object and open it.
+                SegmentDescriptor<SZ>* segd;
                 segd = OpenChannel(cmd->seg_name, kChild);
+                // Start a service thread
+                std::thread* thr;
                 thr = new std::thread{service_func, this, segd};
                 threads_.insert({segd, thr});
                 thr->detach();
                 break;
 
+            /**
+             * The client (parent) has requested to close the cnannels and stop
+             * the thread responsible for handing requests of a specific type.
+             */
             case kHangUp:
                 PROXY_LOG(DBG) << "Child: Got command: kHangUp" << std::endl;
                 break;
 
+            /**
+             * The client (parent) has requested to shutdown/exit this child
+             * (server) process completely.
+             */
             case kShutDownRequest:
                 PROXY_LOG(DBG) << "Child: Got command: kShutDown" << std::endl;
                 exit(0);
-                break;
-
-            default:
                 break;
             }
         }
@@ -729,90 +796,132 @@ protected:
         exit(23);
     }
 
+    /**
+     * Send a management command to the child (server) process.
+     * @param cmd: The command to be sent to the server.
+     */
     void
     SendCommand(Command const& cmd) const
     {
 retry_send_command:
-        int ret = write(GetCommandClientSocket(), reinterpret_cast<void const*>(&cmd), sizeof(cmd));
+        int ret = write(GetCommandSocket(), reinterpret_cast<void const*>(&cmd), sizeof(cmd));
         if (ret == -1) {
-            if (errno == EINTR || errno == EWOULDBLOCK)
+            if (errno == EINTR || errno == EWOULDBLOCK) {
                 goto retry_send_command;
-            else
+            } else {
                 throw ParentWrite2CommandSocketFailed{};
+            }
         }
     }
 
+    /**
+     * The child (server) process call this method to block and wait for management
+     * commands from the parent (client) process.
+     */
     std::shared_ptr<Command>
     WaitForCommand() const
     {
         Command* cmd = new Command{};
 retry_read_command:
-        int ret = read(GetCommandServerSocket(), static_cast<void*>(cmd), sizeof(Command));
+        int ret = read(GetCommandSocket(), static_cast<void*>(cmd), sizeof(Command));
         if (ret == -1) {
-            if (errno == EINTR || errno == EWOULDBLOCK)
+            if (errno == EINTR || errno == EWOULDBLOCK) {
+                /**
+                 * EINTR might be a result of the periodic SIGALRM we send to self
+                 * allow the server process to wake up for housekeeping purposes.
+                 */
                 goto retry_read_command;
-            else
+            } else {
                 throw ChildReadCommandSocketFailed{};
+            }
         }
         return std::shared_ptr<Command>(cmd);
     }
 
     int
-    GetCommandClientSocket() const
+    GetCommandSocket() const
     {
         return (side_ == kParent) ? cmd_ch_[0] : cmd_ch_[1];
-    }
-
-    int
-    GetCommandServerSocket() const
-    {
-        return (side_ == kParent) ? cmd_ch_[0] : cmd_ch_[1];
-    }
-
-    ~AbstractProxy()
-    {
-        
     }
 
     AbstractProxy()
     {
-        int ret = socketpair(AF_UNIX, SOCK_DGRAM, 0, cmd_ch_);
-        if (ret == -1) {
-            PROXY_LOG(ERR) << "cannot create socket pair" << std::endl;
-            perror("socketpair");
-        }
-        this->Init();
-    }
-
-    void Init()
-    {
-        PROXY_LOG(DBG) << "fork()";
-        pid_t pid = fork();
-        if (pid == 0) {
-            ActivateLiveCheck();
-            side_ = kChild;
-        } else if (pid > 0) {
-            side_ = kParent;
-            child_pid_ = pid;
-        } else
-            PROXY_LOG(ERR) << "fork() failed: ";
+        CreateManagementSockets();
+        StartServer();
         status_ = kProxyActive;
     }
 
+    /**
+     * Create a pair of Unix domain datagram sockets that are used for managing
+     * the server process.
+     */
+    void
+    CreateManagementSockets()
+    {
+        int ret = socketpair(AF_UNIX, SOCK_DGRAM, 0, cmd_ch_);
+        if (ret) {
+            PROXY_LOG(ERR) << "cannot create socket pair" << std::endl;
+            PROXY_LOG(ERR) << "socketpair: " << strerror(errno) << std::endl;
+            exit(44);
+        }
+    }
+
+    /**
+     * Fork the server process, and set some related variables.
+     */
+    void
+    StartServer()
+    {
+        PROXY_LOG(DBG) << "About to fork()";
+        pid_t pid = fork();
+        if (pid == 0) {
+            // Child (Server)
+            side_ = kChild;
+            ActivateLiveCheck();
+        } else if (pid > 0) {
+            // Parent (Client)
+            side_ = kParent;
+            child_pid_ = pid;
+        } else {
+            PROXY_LOG(ERR) << "fork() failed: ";
+            exit(33);
+        }
+    }
+
+    /**
+     * The main thread in the server process, blocks on the communication socket
+     * that is used to convey management requests from the client process. This
+     * may cause the server to miss certain events/changes that may occur in its
+     * operation environment. We use a signal to interrupt the 'read' syscall on
+     * this socket, so that the server gets a chance to check certain parameters
+     * and restart the syscall if necessary.
+     */
     void
     ActivateLiveCheck()
     {
         InstallLiveCheckSignalHandlers();
+        StartLiveCheckSignalTimer();
+    }
 
+    /**
+     * Create a POSIX timer to send a SIGALRM regularly.
+     */
+    void
+    StartLiveCheckSignalTimer()
+    {
         struct itimerval val;
         val.it_value.tv_sec = 1;
         val.it_value.tv_usec = 0;
         val.it_interval = val.it_value;
         int ret = setitimer(ITIMER_REAL, &val, NULL);
         if (ret)
-            PROXY_LOG(ERR) << "setitimer:" << strerror(errno);
+            PROXY_LOG(ERR) << "setitimer: " << strerror(errno);
     }
 
+    /**
+     * Install signal handler for SIGALRM. See comments above on method
+     * 'ActivateLiveCheck()'.
+     */
     void
     InstallLiveCheckSignalHandlers()
     {
@@ -841,6 +950,15 @@ public:
             : proxy_{proxy}
         {}
 
+        /**
+         * The main method of the class Execution that establishes the channel
+         * on first call, and then uses that channel (stub) to send requests
+         * to the child (server) process, and retreive the result.
+         * @param  args: The arguments to pass to the function in the server
+         * process.
+         * @retval Returns the result of the operations as performed by the
+         * server process.
+         */
         RET
         _(Args... args)
         {

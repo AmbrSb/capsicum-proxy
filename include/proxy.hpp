@@ -29,8 +29,6 @@
 #include <string.h>
 #include <signal.h>
 
-#define PAGE_SIZE   4096
-#define CHAN_SIZE   4096
 
 #define PROXY_LOG(c) PROXY_LOG_##c
 #define PROXY_LOG_ERR std::cerr
@@ -58,6 +56,7 @@ class InvalidProxyState:                        public std::exception {};
 namespace detail {
 
 inline bool parent_terminated_check();
+inline void* open_map_shm(char const* name, std::size_t sz, bool auto_unlink);
 
 class NullBuffer : public std::streambuf
 {
@@ -72,18 +71,7 @@ public:
         : std::ostream(&m_sb_) {}
 private:
     NullBuffer m_sb_;
-};
-
-NullStream null_stream;
-
-constexpr int  kSHMAlignment = 8;
-
-enum DCODE {
-    kDCode_Init,
-    kDCode_Limit,
-    kDCode_Shutdown,
-    kDCode_Task,
-};
+} null_stream;
 
 enum ChannelStatus {
     kOpen,
@@ -95,7 +83,9 @@ enum ChannelSide {
     kChild,
 };
 
-constexpr uint32_t kSegmentMagic = 0xc7390fbc;
+constexpr uint32_t     kSegmentMagic = 0xc7390fbc;
+constexpr std::size_t  kSHMAlignment = 8;
+constexpr std::size_t  kPageSize     = 4098;
 
 /**
  * Round up x to the smallest multiple of y.
@@ -107,15 +97,18 @@ constexpr uint32_t kSegmentMagic = 0xc7390fbc;
 inline std::size_t
 div_round_up(int x, int y)
 {
-    return y* (1 + (x - 1) / y);
+    return y * (1 + (x - 1) / y);
 }
 
+/**
+ * Given a tuple, this function creates and returns a tuple contain all but its
+ * first element.
+ */
 template <typename Tuple, std::size_t ... Is>
 auto pop_front_impl(const Tuple& tuple, std::index_sequence<Is...>)
 {
     return std::make_tuple(std::get<1 + Is>(tuple)...);
 }
-
 template <typename Tuple>
 auto pop_front(const Tuple& tuple)
 {
@@ -123,6 +116,16 @@ auto pop_front(const Tuple& tuple)
                           std::make_index_sequence<std::tuple_size<Tuple>::value - 1>());
 }
 
+/**
+ * Auxiliary function to open a shared memory segment and map it into the address
+ * space of the current process.
+ * @param  name: The name of the named shared memory.
+ * @param  sz: The size of the shared memory segment.
+ * @param  auto_unlink: If true, this function unlinks the named shared memory
+ * after mapping it.
+ * @retval Upon success this function returns a void* pointer to the beginning
+ * of the shared memory segment.
+ */
 void*
 open_map_shm(char const* name, std::size_t sz, bool auto_unlink)
 {
@@ -130,6 +133,7 @@ open_map_shm(char const* name, std::size_t sz, bool auto_unlink)
     if (fd == -1) {
         PROXY_LOG(ERR) << "Cannot create shared memory for segment";
         PROXY_LOG(ERR) << "shm_open: " << strerror(errno) << std::endl;
+        exit(98);
     }
     int ret = ftruncate(fd, sz);
     if (ret == -1) {
@@ -138,13 +142,16 @@ open_map_shm(char const* name, std::size_t sz, bool auto_unlink)
     }
     void* m = mmap(nullptr, sz,
                     PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (m == MAP_FAILED)
+    if (m == MAP_FAILED) {
         PROXY_LOG(ERR) << "Cannot map shared memory for segment";
+        exit(100);
+    }
     if (auto_unlink) {
         ret = shm_unlink(name);
         if (ret) {
             PROXY_LOG(ERR) << "Cannot unlink the shared memory of segment";
             PROXY_LOG(ERR) << "shm_unlink: " << strerror(errno) << std::endl;
+            exit(101);
         }
     }
     return m;
@@ -153,12 +160,18 @@ open_map_shm(char const* name, std::size_t sz, bool auto_unlink)
 template<std::size_t SZ>
 class SegmentDescriptor;
 
+/**
+ * An instance of Channel, represents a one-way communication medium between the
+ * client process and one of its server processes. In other words, for each pair
+ * of client/server we need 2 instances of channel.
+ * This implementation is based on POSIX named shared memory.
+ */
 template <std::size_t SZ>
 class Channel {
 public:
     friend class SegmentDescriptor<SZ>;
     Channel(std::size_t sz, std::string name, bool auto_unlink)
-        : name_{name}
+        : size_{sz}, name_{name}
     {
         PROXY_LOG(DBG) << "Creating channel - name: " << name << " size: " << sz << std::endl;
         base_ = open_map_shm(name.c_str(), sz, auto_unlink);
@@ -166,11 +179,11 @@ public:
 
     ~Channel()
     {
-        PROXY_LOG(DBG) << "Destructing channel";
-        int ret = munmap(base_, SZ);
+        PROXY_LOG(DBG) << "Destructing channel '" << name_ << "'" << std::endl;
+        int ret = munmap(base_, size_);
         std::cerr << std::flush;
         if (ret)
-            PROXY_LOG(ERR) << "Cannot unmap channel memory";
+            PROXY_LOG(ERR) << "Cannot unmap channel memory '" << name_ << "'" << std::endl;
     }
 
     operator void* ()
@@ -180,14 +193,22 @@ public:
 
 private:
     uint64_t      size_;
+    std::string   name_;
     void*         base_;
     ChannelStatus status_;
-    std::string   name_;
 #ifdef PROXY_DBG
     uint32_t      canary = 0xdeadbeaf;
 #endif
 };
 
+/**
+ * Segment is a wrapper around a Channel that provides higher level operations
+ * such is laying out values into the channel memory, and parsing values from it.
+ * 
+ * @tparam SZ: The size of the shared memory segment used by each channel. SZ should
+ * be large enough for the memory segment to be able to accomodate all of the arguments
+ * or the return value with correct alignment.
+ */
 template<std::size_t SZ>
 class Segment {
 public:
@@ -566,8 +587,7 @@ sig_livecheck_handler(int signo)
 
 template<typename T>
 struct remove_first_type
-{
-};
+{};
 
 template<typename T, typename... Ts>
 struct remove_first_type<std::tuple<T, Ts...>>
@@ -575,35 +595,59 @@ struct remove_first_type<std::tuple<T, Ts...>>
     using type = std::tuple<Ts...>;
 };
 
+/**
+ * The base type for all proxy instances. This base class contains functions and
+ * members that are not dependent on any template parameters.
+ */
 class BaseProxy {
-public:
+protected:
+    constexpr static std::size_t kSegNameSizeMax = 32;
+    /**
+     * These are the command codes that the client (parent) process may send to
+     * server (chidl) process.
+     */
     enum CommandCode {
+        // Start a new channel and thread for this service type.
         kNewChannel,
+        // Stop only this specific service type.
         kHangUp,
+        // Stop this child process completely.
         kShutDownRequest,
     };
+    /**
+     * The structure that represents a specific command and its parameters from
+     * the client process to the server. Instances of this struct are passed over
+     * the management socket from client to server.
+     */
+
+    __attribute__((packed))
     struct Command {
-        char seg_name[128];
+        char seg_name[kSegNameSizeMax];
+        // The function that the service thread should execute
         void* service_func;
         CommandCode code;
-        uint8_t pad[4];
     };
 
-    BaseProxy()
-        : shared_mem_names{}
-    {}
-
-protected:
-    std::unordered_set<std::string> shared_mem_names;
+    /**
+     * This set is shared among all instances of proxy types
+     * for all child processes and all services. This is ensure
+     * That the same named shared memory object is not used twice.
+     */
+    static std::unordered_set<std::string> shared_mem_names;
 
     std::string
     GenerateShMemName()
     {
+        static char kProxyPrefix[] = "/";
+        static char kProxySuffix[] = "_proxy";
+        std::size_t randlen = kSegNameSizeMax -
+                              sizeof(kProxySuffix) -
+                              sizeof(kProxyPrefix) - 1;
         while(true) {
-            auto n = GenerateRandomString(15);
-            if (shared_mem_names.find(n) == shared_mem_names.end()) {
-                shared_mem_names.insert(n);
-                return "/" + n + "_proxy";
+            auto s = GenerateRandomString(randlen);
+            if (shared_mem_names.find(s) == shared_mem_names.end()) {
+                shared_mem_names.insert(s);
+                return std::string{kProxyPrefix} + s + std::string{kProxySuffix};
             }
         }
     }
@@ -624,6 +668,21 @@ protected:
     }
 };
 
+std::unordered_set<std::string> BaseProxy::shared_mem_names{};
+
+/**
+ * This function wrapper wraps the appropriate type of STartServiceLoop
+ * member function instance inside a plain function. We need this to be
+ * able to get a regular function pointer to represent the service loop,
+ * because a function member pointer cannot be portably and reliably
+ * passed between process instances.
+ * 
+ * @param  proxy: The instance of the proxy object owning the specific
+ * service loop we want to pass to the child process.
+ * 
+ * @param  segd: The segment descriptor corresponding to the specific
+ * child process and function type.
+ */
 template<typename Proxy, std::size_t SZX, typename RET, typename... Args>
 void
 AbstractProxyWorkLoopWrapper(Proxy proxy, SegmentDescriptor<SZX>* segd)
@@ -634,6 +693,18 @@ AbstractProxyWorkLoopWrapper(Proxy proxy, SegmentDescriptor<SZX>* segd)
 template <typename SUB, std::size_t SZ>
 class AbstractProxy: public BaseProxy {
 public:
+    /**
+     * This function implements the service loop for each worker thread in the
+     * child (server). For each channel there is exactly one thread that runs
+     * this service loop with the types Args and RET appropriate for its corresponding
+     * fucntion.
+     * 
+     * @tparam RET: The return type of the service function.
+     * 
+     * @tparam Args: The argument types of service function.
+     * 
+     * @param segd: A pointer to the appripriate segment descriptor.
+     */
     template<typename RET, typename... Args>
     void
     StartServiceLoop(SegmentDescriptor<SZ>* segd)
@@ -644,12 +715,17 @@ public:
                 auto ins = segd->template ExtractParams<std::tuple<Args...>>();
                 RET result = static_cast<SUB*>(this)->template Do<RET>(ins);
                 PROXY_LOG(DBG) << "Child: Result ready: " << result << std::endl;
+                // Send the result back to the parent process.
                 segd->SendRequest(result);
             } catch (ParentTerminated& pte) {
                 PROXY_LOG(INF) << "Child: Parent terminated" << std::endl;
-                exit(1);
+                exit(0);
             } catch (HangUpRequest& hure) {
                 PROXY_LOG(INF) << "Child: Got hangup request2" << std::endl;
+                /**
+                 * Free the segment and channel resources and return from this
+                 * function to terminate this service this.
+                 */
                 segd->~SegmentDescriptor();
                 return;
             }
@@ -657,6 +733,11 @@ public:
         __builtin_unreachable();
     }
 
+    /**
+     * This makes the child (server) get stuck in the service loop and wait for
+     * requests from the parent (client). When the parent calls this function, it
+     * just returns without blocking.
+     */
     void
     BlockChildOnCommandLoop()
     {
@@ -664,6 +745,11 @@ public:
             CommandServerLoop();
     }
 
+    /**
+     * Instruct the child (server) corresponding to this instance of AbstractProxy
+     * to shutdown and exit. This will stop all services provided by this instance
+     * of server.
+     */
     void
     ShutdownServer()
     {
@@ -671,8 +757,10 @@ public:
         cmd.code = kShutDownRequest;
         PROXY_LOG(DBG) << "Going to send Shutdown request to child" << std::endl;
         int ret = write(GetCommandSocket(), &cmd, sizeof(cmd));
-        if (ret == -1)
+        if (ret == -1) {
             PROXY_LOG(ERR) << "Cannot write kShutdown request";
+            exit(77);
+        }
     }
 
 protected:
@@ -731,7 +819,7 @@ protected:
         /**
          * Calculate the minumum possible size for the shared memory segment.
          */
-        std::size_t seg_memsz = div_round_up(sizeof(Segment<SZ>), PAGE_SIZE);
+        std::size_t seg_memsz = div_round_up(sizeof(Segment<SZ>), kPageSize);
 
         void* m = open_map_shm(name.c_str(), seg_memsz, auto_unlink_shm);
         Segment<SZ>* seg = new (m) Segment<SZ>{side == kParent, seg_memsz};

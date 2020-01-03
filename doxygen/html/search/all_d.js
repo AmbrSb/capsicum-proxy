@@ -1,6 +1,6 @@
 var searchData=
 [
-  ['page_5fsize',['PAGE_SIZE',['../proxy_8hpp.html#a7d467c1d283fdfa1f2081ba1e0d01b6e',1,'proxy.hpp']]],
+  ['page_5fsize',['kPageSize',['../proxy_8hpp.html#a7d467c1d283fdfa1f2081ba1e0d01b6e',1,'proxy.hpp']]],
   ['parent_5fterminated',['parent_terminated',['../proxy_8hpp.html#afc2f556ffb367cbd8559aa26d9baa913',1,'proxy.hpp']]],
   ['parentterminated',['ParentTerminated',['../classParentTerminated.html',1,'']]],
   ['parentturn',['ParentTurn',['../classSegment.html#a938f93ce0080d9c1b6098e38723aa52f',1,'Segment']]],

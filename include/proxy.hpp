@@ -56,6 +56,19 @@ class BadSegment:                               public std::exception {};
 
 namespace detail {
 
+enum ExitCodes {
+    EC_OK                               = 0,
+    EC_SHM_SEG_CREATE                   = 10,
+    EC_SHM_SEG_TRUNCATE                 = 20,
+    EC_SHM_SEG_MAP                      = 30,
+    EC_SHM_SEG_UNLINK                   = 40,
+    EC_SIGNAL_LIVECHECL_INSTALLATION    = 50,
+    EC_MAN_SOCK_WRITE_SHUTDOWN          = 60,
+    EC_CHILD_LOOP_TERMINATED            = 70,
+    EC_SOCKETPAIR_CREATION              = 80,
+    EC_FORK_FAILED                      = 90,
+};
+
 inline bool has_parent_terminated();
 inline void* open_map_shm(char const* name, std::size_t sz, bool auto_unlink);
 
@@ -146,25 +159,25 @@ open_map_shm(char const* name, std::size_t sz, bool auto_unlink)
     if (fd == -1) {
         PROXY_LOG(ERR) << "Cannot create shared memory for segment";
         PROXY_LOG(ERR) << "shm_open: " << strerror(errno) << std::endl;
-        exit(98);
+        exit(EC_SHM_SEG_CREATE);
     }
     int ret = ftruncate(fd, sz);
     if (ret == -1) {
         PROXY_LOG(ERR) << "Cannot ftruncate shared memory for segment";
-        exit(99);
+        exit(EC_SHM_SEG_TRUNCATE);
     }
     void* m = mmap(nullptr, sz,
                     PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (m == MAP_FAILED) {
         PROXY_LOG(ERR) << "Cannot map shared memory for segment";
-        exit(100);
+        exit(EC_SHM_SEG_MAP);
     }
     if (auto_unlink) {
         ret = shm_unlink(name);
         if (ret) {
             PROXY_LOG(ERR) << "Cannot unlink the shared memory of segment";
             PROXY_LOG(ERR) << "shm_unlink: " << strerror(errno) << std::endl;
-            exit(101);
+            exit(EC_SHM_SEG_UNLINK);
         }
     }
     return m;
@@ -649,7 +662,7 @@ sig_livecheck_handler(int signo)
     if (has_parent_terminated())
     {
         PROXY_LOG(INF) << "Child: parent terminated.";
-        exit(23);
+        exit(EC_SIGNAL_LIVECHECL_INSTALLATION);
     }
 }
 
@@ -787,7 +800,7 @@ public:
                 segd->SendRequest(result);
             } catch (ParentTerminated& pte) {
                 PROXY_LOG(INF) << "Child: Parent terminated" << std::endl;
-                exit(0);
+                exit(EC_OK);
             } catch (HangUpRequest& hure) {
                 PROXY_LOG(INF) << "Child: Got hangup request2" << std::endl;
                 /**
@@ -827,7 +840,7 @@ public:
         int ret = write(GetCommandSocket(), &cmd, sizeof(cmd));
         if (ret == -1) {
             PROXY_LOG(ERR) << "Cannot write kShutdown request";
-            exit(77);
+            exit(EC_MAN_SOCK_WRITE_SHUTDOWN);
         }
     }
 
@@ -944,12 +957,12 @@ protected:
              */
             case kShutDownRequest:
                 PROXY_LOG(DBG) << "Child: Got command: kShutDown" << std::endl;
-                exit(0);
+                exit(EC_OK);
                 break;
             }
         }
         PROXY_LOG(INF) << "Child command loop terminated." << std::endl;
-        exit(23);
+        exit(EC_CHILD_LOOP_TERMINATED);
     }
 
     /**
@@ -1018,7 +1031,7 @@ retry_read_command:
         if (ret) {
             PROXY_LOG(ERR) << "cannot create socket pair" << std::endl;
             PROXY_LOG(ERR) << "socketpair: " << strerror(errno) << std::endl;
-            exit(44);
+            exit(EC_SOCKETPAIR_CREATION);
         }
     }
 
@@ -1040,7 +1053,7 @@ retry_read_command:
             child_pid_ = pid;
         } else {
             PROXY_LOG(ERR) << "fork() failed: ";
-            exit(33);
+            exit(EC_FORK_FAILED);
         }
     }
 

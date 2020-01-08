@@ -116,6 +116,18 @@ TEST(ProxyTest, OperationAfterShutdownShouldThrow) {
                  capsiproxy::InvalidProxyState);
 }
 
+TEST(ProxyTest, TooLargeStringParametersForSZ) {
+    auto p = Proxy<4096, Service>::Build();
+    constexpr int S = 5000;
+    char* largestr = new char[S];
+    for (std::size_t s = 0; s < S; s++)
+        largestr[s] = 'a';
+    largestr[S - 1] = 0;
+    EXPECT_THROW(p.Execute<std::string>(std::string{largestr}),
+                 capsiproxy::SendBufferOverflow);
+    p.Stop<std::string>(""s);
+}
+
 TEST(ProxyTest, StringReturnTest) {
     auto p = Proxy<4096, Service>::Build();
     auto result = p.Execute<std::string>("hello_2"s);

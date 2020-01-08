@@ -52,10 +52,11 @@ class TriedToStopNonExistentSegmentDescriptor:  public std::exception {};
 class OpeningDSOFailed:                         public std::exception {};
 class DSOFunctionLookupFailed:                  public std::exception {};
 class InvalidProxyState:                        public std::exception {};
+class BadSegment:                               public std::exception {};
 
 namespace detail {
 
-inline bool parent_terminated_check();
+inline bool has_parent_terminated();
 inline void* open_map_shm(char const* name, std::size_t sz, bool auto_unlink);
 
 class NullBuffer : public std::streambuf
@@ -98,6 +99,18 @@ inline std::size_t
 div_round_up(int x, int y)
 {
     return y * (1 + (x - 1) / y);
+}
+
+/**
+ * Determines if the parent process of the current process has terminated.
+ */
+inline
+bool has_parent_terminated()
+{
+    /** If our parent is the init process (PID 1), then our parent has already
+     *  exited.
+     */
+     return getppid() == 1;
 }
 
 /**
@@ -156,6 +169,42 @@ open_map_shm(char const* name, std::size_t sz, bool auto_unlink)
     }
     return m;
 }
+
+/**
+ * Check if a given child process has exited for any reason.
+ * @param  cp: PID of the child process.
+ */
+bool
+has_child_terminated(pid_t cp)
+{
+    int status;
+    int ret = waitpid(cp, &status, WNOHANG);
+    if (ret > 0 && (WIFEXITED(status) || WIFSIGNALED(status) || WIFSTOPPED(status)))
+        return true;
+    return false;
+}
+
+/**
+ * Calculate the size of the shared memory buffer needed to contain the parameters
+ * Args...
+ */
+template <typename T>
+constexpr std::size_t
+CalcBufSize()
+{
+    if constexpr (std::is_same<std::string, T>::value)
+        return 8;
+    else
+        return 8;
+}
+
+template <typename T, typename U, typename... Args>
+constexpr std::size_t
+CalcBufSize()
+{
+    return CalcBufSize<T>() + CalcBufSize<U, Args...>();
+}
+
 
 template<std::size_t SZ>
 class SegmentDescriptor;
@@ -220,12 +269,14 @@ public:
           chan_sz_{SZ},
           memsz_{memsz}
     {
-        pthread_mutexattr_t attr;
-        pthread_mutexattr_init(&attr);
-        pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
-        pthread_mutexattr_setrobust(&attr, PTHREAD_MUTEX_ROBUST);
+        if (!init_turn)
+            if (!VerifyIntegrity())
+                throw BadSegment{};
     }
 
+    /**
+     * Determines if currently its the client's turn in this channel.
+     */
     __always_inline
     bool ParentTurn() { return turn_ == kParent; }
     __always_inline
@@ -233,58 +284,75 @@ public:
 
     template <int N, typename TUP>
     void
-    ExtractElem(TUP& instance, void*& recv)
+    ExtractElem(TUP& instance, void*& chan_start)
     {
         if constexpr (std::tuple_size<TUP>::value >= N + 1)
         {
             using TYPE = std::tuple_element_t<N, TUP>;
             if constexpr (std::is_same<TYPE, std::string>::value) {
-                char* item = static_cast<char*>(recv);
+                char* item = static_cast<char*>(chan_start);
                 PROXY_LOG(DBG) << "Extracted string value: " << item << std::endl;
-                std::string tmp {item};
-                std::get<N>(instance) = tmp;
-                recv += tmp.size();
-                chan_sz_ -= tmp.size();
-                auto ret = std::align(kSHMAlignment, 1, recv, chan_sz_);
+                std::string item_str {item};
+                std::string::size_type item_sz = item_str.size();
+                std::get<N>(instance) = item_str;
+                chan_start += item_sz;
+                if (item_sz <= chan_sz_)
+                    chan_sz_ -= item_sz;
+                else
+                    chan_sz_ = 0;
+                auto ret = std::align(kSHMAlignment, 1, chan_start, chan_sz_);
                 if (ret == nullptr)
                     throw ExtractionBufferOverflow{};
             } else {
                 std::add_pointer_t<TYPE> p0;
-                auto item = static_cast<decltype(p0)>(recv);
+                auto item = static_cast<decltype(p0)>(chan_start);
                 PROXY_LOG(DBG) << "Extracted non-string value: " << *item << std::endl;
                 std::get<N>(instance) = *item;
-                recv += sizeof(item);
-                chan_sz_ -= sizeof(item);
-                auto ret = std::align(kSHMAlignment, 1, recv, chan_sz_);
+                chan_start += sizeof(item);
+                if (sizeof(item) <= chan_sz_)
+                    chan_sz_ -= sizeof(item);
+                else
+                    chan_sz_ = 0;
+                auto ret = std::align(kSHMAlignment, 1, chan_start, chan_sz_);
                 if (ret == nullptr)
                     throw ExtractionBufferOverflow{};
             }
         }
     }
 
+    /**
+     * Extract parameters with types as types of tuple T. This method assumes that
+     * tuple T has at most 16 elements.
+     * 
+     * @param  buf: The memory segment in which the raw data is layed out.
+     * 
+     * @retval Returns a tuple of type T that contains the values extracted
+     * from the buffer buf.
+     */
     template <typename T>
     auto
-    ExtractParams(void* recv)
+    ExtractParams(void* buf)
     {
-        PROXY_LOG(DBG) << "ExtractParams: " << recv << std::endl;
+        PROXY_LOG(DBG) << "ExtractParams: " << buf << std::endl;
         T tup;
         static_assert(std::tuple_size<T>::value <= 17);
-        ExtractElem<0> (tup, recv);
-        ExtractElem<1> (tup, recv);
-        ExtractElem<2> (tup, recv);
-        ExtractElem<3> (tup, recv);
-        ExtractElem<4> (tup, recv);
-        ExtractElem<5> (tup, recv);
-        ExtractElem<6> (tup, recv);
-        ExtractElem<7> (tup, recv);
-        ExtractElem<8> (tup, recv);
-        ExtractElem<9> (tup, recv);
-        ExtractElem<10>(tup, recv);
-        ExtractElem<11>(tup, recv);
-        ExtractElem<12>(tup, recv);
-        ExtractElem<13>(tup, recv);
-        ExtractElem<14>(tup, recv);
-        ExtractElem<15>(tup, recv);
+        chan_sz_ = SZ;
+        ExtractElem<0> (tup, buf);
+        ExtractElem<1> (tup, buf);
+        ExtractElem<2> (tup, buf);
+        ExtractElem<3> (tup, buf);
+        ExtractElem<4> (tup, buf);
+        ExtractElem<5> (tup, buf);
+        ExtractElem<6> (tup, buf);
+        ExtractElem<7> (tup, buf);
+        ExtractElem<8> (tup, buf);
+        ExtractElem<9> (tup, buf);
+        ExtractElem<10>(tup, buf);
+        ExtractElem<11>(tup, buf);
+        ExtractElem<12>(tup, buf);
+        ExtractElem<13>(tup, buf);
+        ExtractElem<14>(tup, buf);
+        ExtractElem<15>(tup, buf);
         return tup;
     }
 
@@ -298,11 +366,27 @@ public:
     HangUpRequested() { return status_ == kRequestHangUp; }
 
     ~Segment() {
+        // Inform the child (server) thread that the channel is closed.
         status_ = kRequestHangUp;
         PROXY_LOG(DBG) << "Destructing segment";
     }
 
 private:
+    /**
+     * The server process uses this method to verify that the mapped memory for
+     * the Segment, contains a valid and already initialized Segment object.
+     * @retval Returns true if it detects a valid Segment object, and false
+     * otherwise.
+     */
+    bool VerifyIntegrity() const
+    {
+        return magic_ == kSegmentMagic;
+    }
+
+    /**
+     * This s a RAII style class used to automatically unmap a shared memory segment
+     * upon destruction of its owner (Segment in this case).
+     */
     class AutoUnmapper {
     public:
         AutoUnmapper(void* ptr, std::size_t sz)
@@ -318,12 +402,17 @@ private:
         void* ptr_;
         std::size_t sz_;
     };
+
     enum SegmentStatus {
         kActive,
+        /**
+         * This status flag is set by the parent, to inform the child process
+         * that the channel is now closed and the corresponding service thread
+         * should stop.
+         */
         kRequestHangUp,
     };
 
-    // XXX: use a ring queue so that we can have multiple requests queued at the same time.
     AutoUnmapper autounmap_;
     volatile ChannelSide turn_;
     uint32_t             magic_ = kSegmentMagic;
@@ -332,6 +421,10 @@ private:
     std::size_t memsz_;
 };
 
+/**
+ * This is a wrapper around Segment. Both the server and the client use this
+ * class to work with Segments.
+ */
 template<std::size_t SZ>
 class SegmentDescriptor {
 public:
@@ -343,41 +436,73 @@ public:
         Switch();
     }
 
+    /**
+     * Lay out a series of values of type Args... in a memory segment with
+     * appropriate alignment. This method is called recursively.
+     * 
+     * @param  base: The starting address of the memory segment.
+     * @param  remaining_chan_space: size of available memory left in the segment
+     * @param  t: The first value in the series of type T
+     * @param  args: The reset of the values of types Args...
+     */
     template <typename T, typename... Args>
     void
-    Unroll(void* base, std::size_t chan_sz, T t, Args... args)
+    Unroll(void* base, std::size_t remaining_chan_space, T t, Args... args)
     {
         PROXY_LOG(DBG) << "Unroll: " << base << "  <-- " << t << std::endl;
+        /**
+         * We handle character strings differently from other types.
+         */
         if constexpr (std::is_same<T, std::string>::value) {
             char* base_param = static_cast<char*>(base);
             strcpy(base_param, t.c_str());
             std::string::size_type strlen = t.size();
             base += strlen;
-            chan_sz -= strlen;
-            auto ret = std::align(kSHMAlignment, 1, base, chan_sz);
+            if (strlen <= remaining_chan_space)
+                remaining_chan_space -= strlen;
+            else
+                remaining_chan_space = 0;
+            // Move the base pointer to the next usable address with an alignment
+            // of at least 8 bytes.
+            auto ret = std::align(kSHMAlignment, 1, base, remaining_chan_space);
+            // If std::align returns nullptr it means that the buffer does not have
+            // enought space to hold all of the arguments.
             if (ret == nullptr)
                 throw SendBufferOverflow{};
         } else {
             T* base_param = static_cast<T*>(base);
             *base_param = t;
             base += sizeof(T);
-            chan_sz -= sizeof(T);
-            auto ret = std::align(kSHMAlignment, 1, base, chan_sz);
+            if (sizeof(T) <= remaining_chan_space)
+                remaining_chan_space -= sizeof(T);
+            else
+                remaining_chan_space = 0;
+            // Move the base pointer to the next usable address with an alignment
+            // of at least 8 bytes.
+            auto ret = std::align(kSHMAlignment, 1, base, remaining_chan_space);
+            // If std::align returns nullptr it means that the buffer does not have
+            // enought space to hold all of the arguments.
             if (ret == nullptr)
                 throw SendBufferOverflow{};
         }
 
         if constexpr (sizeof...(args) > 0)
-            Unroll(base, chan_sz, args...);
+            Unroll(base, remaining_chan_space, args...);
     }
 
+    /**
+     * This method block until it's current process's turn and then extracts
+     * values of type tuple T from current channel's receive memory segment.
+     * 
+     * @retval A tuple of type T containing the extracted values.
+     */
     template <typename T>
     auto
     ExtractParams()
     {
         PROXY_LOG(DBG) << ((side_ == kParent) ? "Parent" : "Child")
                        << " is waiting for its turn" << std::endl;
-        Wait(child_pid_);
+        Wait();
         if (side_ == kChild && segment_.HangUpRequested()) {
             PROXY_LOG(DBG) << "Child: Got HangUp request1" << std::endl;
             throw HangUpRequest{};
@@ -385,14 +510,6 @@ public:
         PROXY_LOG(DBG) << ((side_ == kParent) ? "Parent" : "Child")
                        << " is going to extract" << std::endl;
         return segment_.template ExtractParams<T>(GetRecvChannel());
-    }
-
-    template <typename T>
-    void
-    PutResult(T& tup)
-    {
-        segment_.template PutResult<T>(tup);
-        Switch();
     }
 
     Channel<SZ>& GetSendChannel()
@@ -429,74 +546,21 @@ public:
         segment_.~Segment();
     }
 
-    static __always_inline void
-    Lock(pthread_mutex_t& mtx)
-    {
-        int rc;
-        rc = pthread_mutex_lock(&mtx);
-        if (rc == EOWNERDEAD) {
-            /**
-             * Another process has dies while holding this mutex.
-             * We should clean up after that process, and unlock
-             * them mutex when we are done with it.
-             */
-            // CLEANUP_THE_STATE();
-            /**
-             * Tell the runtime that we have taken care of the
-             * situation.
-             */
-            rc = pthread_mutex_consistent(&mtx);
-            if (rc)
-                PROXY_LOG(ERR) << "Failed: Cannot make the mutex consistent!";
-            else
-                PROXY_LOG(ERR) << "Mutex recovered";
-        } else if (rc == ENOTRECOVERABLE) {
-                PROXY_LOG(ERR) << "Failed: Another process has failed to recover " \
-                                    "the mutex and mark it consistent.";
-        } else if (rc) {
-                PROXY_LOG(ERR) << "Failed.";
-        }
-    }
-
     /**
-     * @internal Unlock the PSHARED / ROBUST mutex.
+     * Block until it is our turn again on this segment descriptor, or the process
+     * on the other side of the channel has exited, in which case an exception is
+     * thrown: ChildTerminated and ParentTerminated exceptions in the parent and
+     * child process, respectively.
      */
-    static __always_inline void
-    Unlock(pthread_mutex_t& mtx)
-    {
-        int rc = pthread_mutex_unlock(&mtx);
-        if (rc == EPERM) {
-            PROXY_LOG(ERR) << "Cannot unlock mutex: EPERM";
-            exit(1);
-        } else if (rc == EINVAL) {
-            PROXY_LOG(ERR) << "Cannot unlock mutex: EINVAL";
-            exit(1);
-        }
-    }
-
-
-    bool VerifyIntegrity() const
-    {
-        return segment_.magic_ == kSegmentMagic;
-    }
-
-    bool
-    ChildTerminatedCheck(pid_t cp)
-    {
-        int status;
-        int ret = waitpid(cp, &status, WNOHANG);
-        if (ret > 0 && (WIFEXITED(status) || WIFSIGNALED(status) || WIFSTOPPED(status)))
-            return true;
-        return false;
-    }
-
-    void Wait(pid_t cp)
+    void
+    Wait()
     {
         if (side_ == kParent) {
             while(segment_.turn_ == kChild) {
                 _mm_pause();
+                //XXX
                 usleep(1);
-                if (ChildTerminatedCheck(cp)) {
+                if (has_child_terminated(child_pid_)) {
                     segment_.turn_ = kParent;
                     throw ChildTerminated{};
                 }
@@ -504,22 +568,34 @@ public:
         } else if (side_ == kChild) {
             while(segment_.turn_ == kParent) {
                 _mm_pause();
+                //XXX
                 usleep(1);
-                if (parent_terminated_check()) {
+                if (has_parent_terminated()) {
                     throw ParentTerminated{};
                 }
             }
         }
     }
 
-    void Switch()
-    { segment_.turn_ = (segment_.turn_ == kParent) ? kChild : kParent; }
+    /**
+     * Pass the turn for this communication channel to the other side (process)
+     */
+    void
+    Switch()
+    {
+        segment_.turn_ = (segment_.turn_ == kParent) ? kChild : kParent;
+    }
    
-    Segment<SZ>& GetSegment() const
+    Segment<SZ>&
+    GetSegment() const
     {
         return segment_;
     }
 
+    /**
+     * This method is called on the server (child) side to determine if the parent
+     * has requested it to hang up (end) this channel.
+     */
     bool
     HangUpRequested()
     {
@@ -534,20 +610,16 @@ private:
     Channel<SZ>     recv_;
 };
 
-
-inline
-bool parent_terminated_check()
-{
-    return getppid() == 1;
-}
-
-
+/**
+ * Stub is used by the client to call upon the server. The stub
+ * redirects such calls to the server and extracts and parses
+ * the response and returns it to the caller.
+ */
 template<std::size_t SZ>
 class Stub {
 public:
     Stub(SegmentDescriptor<SZ>& segd)
-        : chan_sz_{SZ},
-          segd_{segd}
+        : segd_{segd}
     { }
 
     template <typename... Args>
@@ -567,21 +639,17 @@ public:
     }
 
 private:
-    std::size_t chan_sz_;
     SegmentDescriptor<SZ>& segd_;
 };
-
-extern "C"
-void sig_livecheck_handler(int signo);
 
 extern "C"
 void
 sig_livecheck_handler(int signo)
 {
-    if (parent_terminated_check())
+    if (has_parent_terminated())
     {
         PROXY_LOG(INF) << "Child: parent terminated.";
-        exit(0);
+        exit(23);
     }
 }
 
@@ -1175,6 +1243,9 @@ public:
     RET
     Execute(Args... args)
     {
+        static_assert(CalcBufSize<Args...>() <= SZ, "SZ is too small for Args");
+        static_assert(CalcBufSize<RET>() <= SZ, "SZ is too small for RET");
+
         if (status_ != kProxyActive)
             throw InvalidProxyState{};
         return ExecuteInternal<RET, Args...>(kQuery, args...);

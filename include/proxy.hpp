@@ -69,9 +69,6 @@ enum ExitCodes {
     EC_FORK_FAILED                      = 90,
 };
 
-inline bool has_parent_terminated();
-inline void* open_map_shm(char const* name, std::size_t sz, bool auto_unlink);
-
 class NullBuffer : public std::streambuf
 {
 public:
@@ -102,6 +99,14 @@ constexpr std::size_t  kSHMAlignment = 8;
 constexpr std::size_t  kPageSize     = 4098;
 
 /**
+ * The utils namespace holds a bunch of utility stand-alone functions used internally
+ * by the implemenation.
+ */
+inline namespace utils {
+inline bool has_parent_terminated();
+inline void* open_map_shm(char const* name, std::size_t sz, bool auto_unlink);
+
+/**
  * Round up x to the smallest multiple of y.
  * @param  x: The value to be rounded up
  * @param  y: The multiplier
@@ -124,6 +129,17 @@ bool has_parent_terminated()
      *  exited.
      */
      return getppid() == 1;
+}
+
+extern "C"
+void
+sig_livecheck_handler(int signo)
+{
+    if (has_parent_terminated())
+    {
+        PROXY_LOG(INF) << "Child: parent terminated.";
+        exit(EC_SIGNAL_LIVECHECL_INSTALLATION);
+    }
 }
 
 /**
@@ -218,6 +234,7 @@ CalcBufSize()
     return CalcBufSize<T>() + CalcBufSize<U, Args...>();
 }
 
+} // end of 'utils' namespace
 
 template<std::size_t SZ>
 class SegmentDescriptor;
@@ -238,6 +255,11 @@ public:
         PROXY_LOG(DBG) << "Creating channel - name: " << name << " size: " << sz << std::endl;
         base_ = open_map_shm(name.c_str(), sz, auto_unlink);
     }
+
+    Channel(Channel const& c) = delete;
+    Channel(Channel&& c) = delete;
+    Channel& operator=(Channel const& c) = delete;
+    Channel& operator=(Channel const&& c) = delete;
 
     ~Channel()
     {
@@ -286,6 +308,11 @@ public:
             if (!VerifyIntegrity())
                 throw BadSegment{};
     }
+
+    Segment(Segment const& s) = delete;
+    Segment(Segment&& s) = delete;
+    Segment& operator=(Segment const& s) = delete;
+    Segment& operator=(Segment&& s) = delete;
 
     /**
      * Determines if currently its the client's turn in this channel.
@@ -441,6 +468,35 @@ private:
 template<std::size_t SZ>
 class SegmentDescriptor {
 public:
+    SegmentDescriptor(std::string name, ChannelSide side, Segment<SZ>& seg, pid_t cp)
+        : side_{side},
+          segment_{seg},
+          child_pid_{cp},
+        /**
+         * The named shared memory was used to establish a communication channel
+         * the client and server processes. After the channel is connected, we
+         * no longer need keep the named shared memory linked in /dev/shm.
+         * We do the unlinking on the child (server) side after opening the channels.
+         */
+          send_{SZ, name + "_ch_c2s", /*auto unlink*/ side == kChild},
+          recv_{SZ, name + "_ch_s2c", /*auto unlink*/ side == kChild}
+    {
+
+        GetSendChannel().status_ = kOpen;
+    }
+
+    SegmentDescriptor(SegmentDescriptor const& sd) = delete;
+    SegmentDescriptor(SegmentDescriptor&& sd) = delete;
+    SegmentDescriptor& operator=(SegmentDescriptor const& sd) = delete;
+    SegmentDescriptor& operator=(SegmentDescriptor&& sd) = delete;
+
+    ~SegmentDescriptor()
+    {
+        GetSendChannel().status_ = kClosed;
+        Switch();
+        segment_.~Segment();
+    }
+
     template <typename... Args>
     void
     SendRequest(Args... args)
@@ -535,30 +591,6 @@ public:
         return ((side_ == kParent) ? recv_ : send_);
     }
 
-    SegmentDescriptor(std::string name, ChannelSide side, Segment<SZ>& seg, pid_t cp)
-        : side_{side},
-          segment_{seg},
-          child_pid_{cp},
-        /**
-         * The named shared memory was used to establish a communication channel
-         * the client and server processes. After the channel is connected, we
-         * no longer need keep the named shared memory linked in /dev/shm.
-         * We do the unlinking on the child (server) side after opening the channels.
-         */
-          send_{SZ, name + "_ch_c2s", /*auto unlink*/ side == kChild},
-          recv_{SZ, name + "_ch_s2c", /*auto unlink*/ side == kChild}
-    {
-
-        GetSendChannel().status_ = kOpen;
-    }
-
-    ~SegmentDescriptor()
-    {
-        GetSendChannel().status_ = kClosed;
-        Switch();
-        segment_.~Segment();
-    }
-
     /**
      * Block until it is our turn again on this segment descriptor, or the process
      * on the other side of the channel has exited, in which case an exception is
@@ -635,6 +667,11 @@ public:
         : segd_{segd}
     { }
 
+    Stub(Stub const& s) = delete;
+    Stub(Stub&& s) = delete;
+    Stub& operator=(Stub const& s) = delete;
+    Stub& operator=(Stub&& s) = delete;
+
     template <typename... Args>
     void
     SendRequest(Args... args)
@@ -654,17 +691,6 @@ public:
 private:
     SegmentDescriptor<SZ>& segd_;
 };
-
-extern "C"
-void
-sig_livecheck_handler(int signo)
-{
-    if (has_parent_terminated())
-    {
-        PROXY_LOG(INF) << "Child: parent terminated.";
-        exit(EC_SIGNAL_LIVECHECL_INSTALLATION);
-    }
-}
 
 template<typename T>
 struct remove_first_type
@@ -774,6 +800,18 @@ AbstractProxyWorkLoopWrapper(Proxy proxy, SegmentDescriptor<SZX>* segd)
 template <typename SUB, std::size_t SZ>
 class AbstractProxy: public BaseProxy {
 public:
+    AbstractProxy()
+    {
+        CreateManagementSockets();
+        StartServer();
+        status_ = kProxyActive;
+    }
+
+    AbstractProxy(AbstractProxy const& ap) = delete;
+    AbstractProxy(AbstractProxy&& ap) = delete;
+    AbstractProxy& operator=(AbstractProxy const& ap) = delete;
+    AbstractProxy& operator=(AbstractProxy&& ap) = delete;
+
     /**
      * This function implements the service loop for each worker thread in the
      * child (server). For each channel there is exactly one thread that runs
@@ -1013,13 +1051,6 @@ retry_read_command:
         return (side_ == kParent) ? cmd_ch_[0] : cmd_ch_[1];
     }
 
-    AbstractProxy()
-    {
-        CreateManagementSockets();
-        StartServer();
-        status_ = kProxyActive;
-    }
-
     /**
      * Create a pair of Unix domain datagram sockets that are used for managing
      * the server process.
@@ -1118,6 +1149,11 @@ public:
         Execution(PRX* proxy)
             : proxy_{proxy}
         {}
+
+        Execution(Execution const& e) = delete;
+        Execution(Execution& e) = delete;
+        Execution& operator=(Execution const& e) = delete;
+        Execution& operator=(Execution&& e) = delete;
 
         /**
          * The main method of the class Execution that establishes the channel
@@ -1473,12 +1509,12 @@ public:
      * in a service loop that receives request from the parent (client) instance
      * and returns the response.
      */
-    static ProxyDirect<SZ, SERV>
+    static ProxyDirect<SZ, SERV>&
     Build()
     {
-        auto proxy = ProxyDirect<SZ, SERV>{};
-        proxy.BlockChildOnCommandLoop();
-        return proxy;
+        auto proxy = new ProxyDirect<SZ, SERV>{};
+        proxy->BlockChildOnCommandLoop();
+        return *proxy;
     }
 
     /**
@@ -1490,12 +1526,12 @@ public:
      * in a service loop that receives request from the parent (client) instance
      * and returns the response.
      */
-    static ProxySO<SZ>
+    static ProxySO<SZ>&
     Build(std::string dso_path)
     {
-        auto proxy = ProxySO<SZ>{dso_path};
-        proxy.BlockChildOnCommandLoop();
-        return proxy;
+        auto proxy = new ProxySO<SZ>{dso_path};
+        proxy->BlockChildOnCommandLoop();
+        return *proxy;
     }
 
 };

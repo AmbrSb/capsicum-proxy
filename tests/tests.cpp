@@ -138,7 +138,7 @@ TEST(ProxyTest, StringReturnTest) {
 }
 
 TEST(ProxyDLOAPITest, NumericTest) {
-    auto& p = Proxy<4096>::Build("/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/libtest.so");
+    auto& p = Proxy<4096>::Build("./libtest.so");
     auto result = p.Execute<int>("add"s, 20, 30);
     ASSERT_EQ(result, 50);
     result = p.Execute<int>("add"s, 163, 9);

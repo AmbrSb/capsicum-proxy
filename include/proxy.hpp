@@ -253,7 +253,8 @@ public:
         : size_{sz}, name_{name}
     {
         PROXY_LOG(DBG) << "Creating channel - name: " << name << " size: " << sz << std::endl;
-        base_ = open_map_shm(name.c_str(), sz, auto_unlink);
+        auto ptr = open_map_shm(name.c_str(), sz, auto_unlink);
+        base_ = reinterpret_cast<std::byte*>(ptr);
     }
 
     Channel(Channel const& c) = delete;
@@ -270,7 +271,7 @@ public:
             PROXY_LOG(ERR) << "Cannot unmap channel memory '" << name_ << "'" << std::endl;
     }
 
-    operator void* ()
+    operator std::byte* ()
     {
         return base_;
     }
@@ -278,7 +279,7 @@ public:
 private:
     uint64_t      size_;
     std::string   name_;
-    void*         base_;
+    std::byte*    base_;
     ChannelStatus status_;
 #ifdef PROXY_DBG
     uint32_t      canary = 0xdeadbeaf;
@@ -322,15 +323,23 @@ public:
     __always_inline
     bool ChildTurn() { return !ParentTurn(); }
 
+    /**
+     * Extract an element of the N-th type in the tuple type TUP from the buffer
+     * pointed to by chan_start, and advance chan_start to the next valid data
+     * point. The extracted value will be put into the tuple instance.
+     * I refrained from returning the extracted value, because we would have had
+     * to make an instance (through templatization) of this function for each
+     * return type.
+     */
     template <int N, typename TUP>
     void
-    ExtractElem(TUP& instance, void*& chan_start)
+    ExtractElem(TUP& instance, std::byte*& chan_start)
     {
         if constexpr (std::tuple_size<TUP>::value >= N + 1)
         {
             using TYPE = std::tuple_element_t<N, TUP>;
             if constexpr (std::is_same<TYPE, std::string>::value) {
-                char* item = static_cast<char*>(chan_start);
+                char* item = reinterpret_cast<char*>(chan_start);
                 PROXY_LOG(DBG) << "Extracted string value: " << item << std::endl;
                 std::string item_str {item};
                 std::string::size_type item_sz = item_str.size();
@@ -340,12 +349,12 @@ public:
                     chan_sz_ -= item_sz;
                 else
                     chan_sz_ = 0;
-                auto ret = std::align(kSHMAlignment, 1, chan_start, chan_sz_);
+                auto ret = std::align(kSHMAlignment, 1, reinterpret_cast<void*&>(chan_start), chan_sz_);
                 if (ret == nullptr)
                     throw ExtractionBufferOverflow{};
             } else {
                 std::add_pointer_t<TYPE> p0;
-                auto item = static_cast<decltype(p0)>(chan_start);
+                auto item = reinterpret_cast<decltype(p0)>(chan_start);
                 PROXY_LOG(DBG) << "Extracted non-string value: " << *item << std::endl;
                 std::get<N>(instance) = *item;
                 chan_start += sizeof(item);
@@ -353,7 +362,7 @@ public:
                     chan_sz_ -= sizeof(item);
                 else
                     chan_sz_ = 0;
-                auto ret = std::align(kSHMAlignment, 1, chan_start, chan_sz_);
+                auto ret = std::align(kSHMAlignment, 1, reinterpret_cast<void*&>(chan_start), chan_sz_);
                 if (ret == nullptr)
                     throw ExtractionBufferOverflow{};
             }
@@ -371,7 +380,7 @@ public:
      */
     template <typename T>
     auto
-    ExtractParams(void* buf)
+    ExtractParams(std::byte* buf)
     {
         PROXY_LOG(DBG) << "ExtractParams: " << buf << std::endl;
         T tup;
@@ -516,14 +525,14 @@ public:
      */
     template <typename T, typename... Args>
     void
-    Unroll(void* base, std::size_t remaining_chan_space, T t, Args... args)
+    Unroll(std::byte* base, std::size_t remaining_chan_space, T t, Args... args)
     {
         PROXY_LOG(DBG) << "Unroll: " << base << "  <-- " << t << std::endl;
         /**
          * We handle character strings differently from other types.
          */
         if constexpr (std::is_same<T, std::string>::value) {
-            char* base_param = static_cast<char*>(base);
+            char* base_param = reinterpret_cast<char*>(base);
             strcpy(base_param, t.c_str());
             std::string::size_type strlen = t.size();
             base += strlen;
@@ -533,13 +542,13 @@ public:
                 remaining_chan_space = 0;
             // Move the base pointer to the next usable address with an alignment
             // of at least 8 bytes.
-            auto ret = std::align(kSHMAlignment, 1, base, remaining_chan_space);
+            auto ret = std::align(kSHMAlignment, 1, reinterpret_cast<void*&>(base), remaining_chan_space);
             // If std::align returns nullptr it means that the buffer does not have
             // enought space to hold all of the arguments.
             if (ret == nullptr)
                 throw SendBufferOverflow{};
         } else {
-            T* base_param = static_cast<T*>(base);
+            T* base_param = reinterpret_cast<T*>(base);
             *base_param = t;
             base += sizeof(T);
             if (sizeof(T) <= remaining_chan_space)
@@ -548,7 +557,7 @@ public:
                 remaining_chan_space = 0;
             // Move the base pointer to the next usable address with an alignment
             // of at least 8 bytes.
-            auto ret = std::align(kSHMAlignment, 1, base, remaining_chan_space);
+            auto ret = std::align(kSHMAlignment, 1, reinterpret_cast<void*&>(base), remaining_chan_space);
             // If std::align returns nullptr it means that the buffer does not have
             // enought space to hold all of the arguments.
             if (ret == nullptr)

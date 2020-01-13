@@ -18,6 +18,7 @@
 #include <unordered_map>
 #include <thread>
 #include <random>
+#include <iterator>
 #include <functional>
 
 #include <dlfcn.h>
@@ -271,7 +272,8 @@ public:
             PROXY_LOG(ERR) << "Cannot unmap channel memory '" << name_ << "'" << std::endl;
     }
 
-    operator std::byte* ()
+    std::byte*
+    data()
     {
         return base_;
     }
@@ -510,7 +512,7 @@ public:
     void
     SendRequest(Args... args)
     {
-        Unroll(GetSendChannel(), SZ, args...);
+        Unroll(std::data(GetSendChannel()), SZ, args...);
         Switch();
     }
 
@@ -587,7 +589,7 @@ public:
         }
         PROXY_LOG(DBG) << ((side_ == kParent) ? "Parent" : "Child")
                        << " is going to extract" << std::endl;
-        return segment_.template ExtractParams<T>(GetRecvChannel());
+        return segment_.template ExtractParams<T>(std::data(GetRecvChannel()));
     }
 
     Channel<SZ>& GetSendChannel()

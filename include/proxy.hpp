@@ -1,5 +1,8 @@
 #pragma once
 
+#ifdef __FreeBSD__
+#include <sys/capsicum.h>
+#endif
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -1087,6 +1090,9 @@ retry_read_command:
         pid_t pid = fork();
         if (pid == 0) {
             // Child (Server)
+#ifdef __FreeBSD__
+	    cap_enter();
+#endif
             side_ = kChild;
             ActivateLiveCheck();
         } else if (pid > 0) {

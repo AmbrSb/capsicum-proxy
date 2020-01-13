@@ -1392,7 +1392,7 @@ private:
 template <std::size_t SZ, typename SERV>
 class ProxyDirect final: public detail::AbstractProxy<ProxyDirect<SZ, SERV>, SZ> {
 public:
-    ProxyDirect()
+    ProxyDirect() noexcept
         : detail::AbstractProxy<ProxyDirect, SZ>{},
           service_{}
     {}

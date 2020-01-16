@@ -84,7 +84,7 @@ TEST(ProxyTest, NumericTest) {
     ASSERT_EQ(result, 17);
     auto result2 = p.Execute<double>(7, 19, 23);
     ASSERT_EQ(result2, 49.78);
-    p.Shutdown<double>(0, 0, 0);
+    p.Shutdown<int>(0);
 }
 
 TEST(ProxyTest, NumericTest2) {

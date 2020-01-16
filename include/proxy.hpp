@@ -1,8 +1,5 @@
 #pragma once
 
-#ifdef __FreeBSD__
-#include <sys/capsicum.h>
-#endif
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -13,6 +10,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstddef>
 #include <iostream>
 #include <memory>
 #include <type_traits>
@@ -38,7 +36,6 @@
 #define PROXY_LOG_ERR std::cerr
 #define PROXY_LOG_DBG std::cerr
 #define PROXY_LOG_INF std::cerr
-
 
 namespace capsiproxy {
 
@@ -108,7 +105,8 @@ constexpr std::size_t  kPageSize     = 4098;
  */
 inline namespace utils {
 inline bool has_parent_terminated();
-inline void* open_map_shm(char const* name, std::size_t sz, bool auto_unlink);
+std::tuple<void*, int> open_map_shm(std::size_t sz);
+void* open_map_shm(int fd, std::size_t sz);
 
 /**
  * Round up x to the smallest multiple of y.
@@ -146,6 +144,46 @@ sig_livecheck_handler(int signo)
     }
 }
 
+std::string
+GenerateRandomString(std::string::size_type length)
+{
+    static auto& chrs = "0123456789"
+        "abcdefghijklmnopqrstuvwxyz"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    thread_local static std::mt19937 rg{std::random_device{}()};
+    thread_local static std::uniform_int_distribution<std::string::size_type> pick(0, sizeof(chrs) - 2);
+    std::string s;
+    s.reserve(length);
+    while(length--)
+        s += chrs[pick(rg)];
+    return s;
+}
+
+std::string
+GenerateShMemName()
+{
+    constexpr static std::size_t kSegNameSizeMax = 32;
+    /**
+     * This set is shared among all instances of proxy types
+     * for all child processes and all services. This is ensure
+     * That the same named shared memory object is not used twice.
+     */
+    static std::unordered_set<std::string> shared_mem_names;
+
+    static char kProxyPrefix[] = "/";
+    static char kProxySuffix[] = "_proxy";
+    std::size_t randlen = kSegNameSizeMax -
+                            sizeof(kProxySuffix) -
+                            sizeof(kProxyPrefix) - 1;
+    while(true) {
+        auto s = GenerateRandomString(randlen);
+        if (shared_mem_names.find(s) == shared_mem_names.end()) {
+            shared_mem_names.insert(s);
+            return std::string{kProxyPrefix} + s + std::string{kProxySuffix};
+        }
+    }
+}
+
 /**
  * Given a tuple, this function creates and returns a tuple contain all but its
  * first element.
@@ -173,14 +211,8 @@ auto pop_front(const Tuple& tuple)
  * of the shared memory segment.
  */
 void*
-open_map_shm(char const* name, std::size_t sz, bool auto_unlink)
+open_map_shm(int fd, std::size_t sz)
 {
-    int fd = shm_open(name, O_RDWR | O_CREAT, S_IRWXU);
-    if (fd == -1) {
-        PROXY_LOG(ERR) << "Cannot create shared memory for segment";
-        PROXY_LOG(ERR) << "shm_open: " << strerror(errno) << std::endl;
-        exit(EC_SHM_SEG_CREATE);
-    }
     int ret = ftruncate(fd, sz);
     if (ret == -1) {
         PROXY_LOG(ERR) << "Cannot ftruncate shared memory for segment";
@@ -192,15 +224,27 @@ open_map_shm(char const* name, std::size_t sz, bool auto_unlink)
         PROXY_LOG(ERR) << "Cannot map shared memory for segment";
         exit(EC_SHM_SEG_MAP);
     }
-    if (auto_unlink) {
-        ret = shm_unlink(name);
-        if (ret) {
-            PROXY_LOG(ERR) << "Cannot unlink the shared memory of segment";
-            PROXY_LOG(ERR) << "shm_unlink: " << strerror(errno) << std::endl;
-            exit(EC_SHM_SEG_UNLINK);
-        }
-    }
     return m;
+}
+
+std::tuple<void*, int>
+open_map_shm(std::size_t sz)
+{
+    auto name = detail::GenerateShMemName();
+    int fd = shm_open(name.c_str(), O_RDWR | O_CREAT, S_IRWXU);
+    if (fd == -1) {
+        PROXY_LOG(ERR) << "Cannot create shared memory for segment";
+        PROXY_LOG(ERR) << "shm_open: " << strerror(errno) << std::endl;
+        exit(EC_SHM_SEG_CREATE);
+    }
+    auto ptr = open_map_shm(fd, sz);
+    int ret = shm_unlink(name.c_str());
+    if (ret) {
+        PROXY_LOG(ERR) << "Cannot unlink the shared memory of segment";
+        PROXY_LOG(ERR) << "shm_unlink: " << strerror(errno) << std::endl;
+        exit(EC_SHM_SEG_UNLINK);
+    }
+    return std::make_tuple(ptr, fd);
 }
 
 /**
@@ -253,27 +297,41 @@ template <std::size_t SZ>
 class Channel {
 public:
     friend class SegmentDescriptor<SZ>;
-    Channel(std::size_t sz, std::string name, bool auto_unlink)
-        : size_{sz}, name_{name}
+    Channel()
     {
-        PROXY_LOG(DBG) << "Creating channel - name: " << name << " size: " << sz << std::endl;
-        auto ptr = open_map_shm(name.c_str(), sz, auto_unlink);
+        auto [ptr, fd] = open_map_shm(SZ);
+        fd_ = fd;
+        PROXY_LOG(DBG) << "Created channel fd: " << fd << " size: " << SZ << std::endl;
         base_ = reinterpret_cast<std::byte*>(ptr);
+    }
+
+    Channel(int fd)
+        : fd_{fd}
+    {
+        PROXY_LOG(DBG) << "Creating channel - fd: " << fd << " size: " << SZ << std::endl;
+        auto ptr = open_map_shm(fd, SZ);
+        base_ = reinterpret_cast<std::byte*>(ptr);
+    }
+
+    ~Channel()
+    {
+        if (fd_ < 0)
+            return;
+        PROXY_LOG(DBG) << "Destructing channel. fd: " << fd_ << std::endl;
+        int ret = close(fd_);
+        if (ret) {
+            PROXY_LOG(ERR) << "Cannot close fd " << fd_ << std::endl;
+        }
+        ret = munmap(base_, SZ);
+        std::cerr << std::flush;
+        if (ret)
+            PROXY_LOG(ERR) << "Cannot unmap channel memory " << std::endl;
     }
 
     Channel(Channel const& c) = delete;
     Channel(Channel&& c) = delete;
     Channel& operator=(Channel const& c) = delete;
-    Channel& operator=(Channel const&& c) = delete;
-
-    ~Channel()
-    {
-        PROXY_LOG(DBG) << "Destructing channel '" << name_ << "'" << std::endl;
-        int ret = munmap(base_, size_);
-        std::cerr << std::flush;
-        if (ret)
-            PROXY_LOG(ERR) << "Cannot unmap channel memory '" << name_ << "'" << std::endl;
-    }
+    Channel& operator=(Channel&& c) = delete;
 
     std::byte*
     data()
@@ -281,11 +339,13 @@ public:
         return base_;
     }
 
+    int
+    GetFd() { return fd_; }
+
 private:
-    uint64_t      size_;
-    std::string   name_;
     std::byte*    base_;
     ChannelStatus status_;
+    int           fd_;
 #ifdef PROXY_DBG
     uint32_t      canary = 0xdeadbeaf;
 #endif
@@ -482,7 +542,23 @@ private:
 template<std::size_t SZ>
 class SegmentDescriptor {
 public:
-    SegmentDescriptor(std::string name, ChannelSide side, Segment<SZ>& seg, pid_t cp)
+    SegmentDescriptor(int fd, ChannelSide side, Segment<SZ>& seg, pid_t cp)
+        : side_{side},
+          segment_{seg},
+          child_pid_{cp},
+          fd_{fd}
+    {
+        /**
+         * The named shared memory was used to establish a communication channel
+         * the client and server processes. After the channel is connected, we
+         * no longer need keep the named shared memory linked in /dev/shm.
+         * We do the unlinking on the child (server) side after opening the channels.
+         */
+        std::string name = GenerateShMemName();
+        GetSendChannel().status_ = kOpen;
+    }
+
+    SegmentDescriptor(int sndfd, int rcvfd, ChannelSide side, Segment<SZ>& seg, pid_t cp)
         : side_{side},
           segment_{seg},
           child_pid_{cp},
@@ -492,8 +568,9 @@ public:
          * no longer need keep the named shared memory linked in /dev/shm.
          * We do the unlinking on the child (server) side after opening the channels.
          */
-          send_{SZ, name + "_ch_c2s", /*auto unlink*/ side == kChild},
-          recv_{SZ, name + "_ch_s2c", /*auto unlink*/ side == kChild}
+          fd_{-1},
+          send_{sndfd},
+          recv_{rcvfd}
     {
 
         GetSendChannel().status_ = kOpen;
@@ -509,6 +586,9 @@ public:
         GetSendChannel().status_ = kClosed;
         Switch();
         segment_.~Segment();
+        if (fd_ > -1) {
+            close(fd_);
+        }
     }
 
     template <typename... Args>
@@ -661,12 +741,22 @@ public:
         return segment_.HangUpRequested();
     }
 
+    int
+    GetSegFd() { return fd_; }
+
+    int
+    GetSndFd() { return send_.GetFd(); }
+
+    int
+    GetRcvFd() { return recv_.GetFd(); }
+
 private:
     ChannelSide     side_;
     Segment<SZ>&    segment_;
     pid_t           child_pid_;
     Channel<SZ>     send_;
     Channel<SZ>     recv_;
+    int             fd_;
 };
 
 /**
@@ -722,7 +812,6 @@ struct remove_first_type<std::tuple<T, Ts...>>
  */
 class BaseProxy {
 protected:
-    constexpr static std::size_t kSegNameSizeMax = 32;
     /**
      * These are the command codes that the client (parent) process may send to
      * server (chidl) process.
@@ -743,53 +832,14 @@ protected:
 
     __attribute__((packed))
     struct Command {
-        char seg_name[kSegNameSizeMax];
         // The function that the service thread should execute
         void* service_func;
         CommandCode code;
+        int segfd;
+        int sndfd;
+        int rcvfd;
     };
-
-    /**
-     * This set is shared among all instances of proxy types
-     * for all child processes and all services. This is ensure
-     * That the same named shared memory object is not used twice.
-     */
-    static std::unordered_set<std::string> shared_mem_names;
-
-    std::string
-    GenerateShMemName()
-    {
-        static char kProxyPrefix[] = "/";
-        static char kProxySuffix[] = "_proxy";
-        std::size_t randlen = kSegNameSizeMax -
-                              sizeof(kProxySuffix) -
-                              sizeof(kProxyPrefix) - 1;
-        while(true) {
-            auto s = GenerateRandomString(randlen);
-            if (shared_mem_names.find(s) == shared_mem_names.end()) {
-                shared_mem_names.insert(s);
-                return std::string{kProxyPrefix} + s + std::string{kProxySuffix};
-            }
-        }
-    }
-
-    std::string
-    GenerateRandomString(std::string::size_type length)
-    {
-        static auto& chrs = "0123456789"
-            "abcdefghijklmnopqrstuvwxyz"
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-        thread_local static std::mt19937 rg{std::random_device{}()};
-        thread_local static std::uniform_int_distribution<std::string::size_type> pick(0, sizeof(chrs) - 2);
-        std::string s;
-        s.reserve(length);
-        while(length--)
-            s += chrs[pick(rg)];
-        return s;
-    }
 };
-
-std::unordered_set<std::string> BaseProxy::shared_mem_names{};
 
 /**
  * This function wrapper wraps the appropriate type of STartServiceLoop
@@ -853,7 +903,7 @@ public:
             } catch (ParentTerminated& pte) {
                 PROXY_LOG(INF) << "Child: Parent terminated" << std::endl;
                 exit(EC_OK);
-            } catch (HangUpRequest& hure) {
+            } catch (HangUpRequest&) {
                 PROXY_LOG(INF) << "Child: Got hangup request2" << std::endl;
                 /**
                  * Free the segment and channel resources and return from this
@@ -914,14 +964,41 @@ protected:
      */
     template<typename SFUNC>
     void
-    SendNewChannelInfo(std::string name, SFUNC service_func)
+    SendNewChannelInfo(int segfd, int sndfd, int rcvfd, SFUNC service_func)
     {
         Command cmd;
-        assert(name.size() < sizeof(cmd.seg_name));
-        strcpy(cmd.seg_name, name.c_str());
         cmd.service_func = reinterpret_cast<void*>(service_func);
         cmd.code = kNewChannel;
-        int ret = write(GetCommandSocket(), &cmd, sizeof(cmd));
+
+        struct msghdr msg;
+        struct cmsghdr *cmsghdr;
+        struct iovec iov[1];
+        int* p;
+        union {
+            struct cmsghdr hdr;
+            unsigned char  buf[CMSG_SPACE(sizeof(int) * 3)];
+        } cmsgbuf;
+
+        iov[0].iov_base = &cmd;
+        iov[0].iov_len = sizeof(cmd);
+        memset(&cmsgbuf.buf, 0x0b, sizeof(cmsgbuf.buf));
+        cmsghdr = &cmsgbuf.hdr;
+        cmsghdr->cmsg_len = CMSG_LEN(sizeof(int) * 3);
+        cmsghdr->cmsg_level = SOL_SOCKET;
+        cmsghdr->cmsg_type = SCM_RIGHTS;
+        msg.msg_name = NULL;
+        msg.msg_namelen = 0;
+        msg.msg_iov = iov;
+        msg.msg_iovlen = sizeof(iov) / sizeof(iov[0]);
+        msg.msg_control = cmsghdr;
+        msg.msg_controllen = sizeof(cmsgbuf.buf);
+        msg.msg_flags = 0;
+        p = (int*)CMSG_DATA(cmsghdr);
+        *p       =  segfd;
+        *(p + 1) =  sndfd;
+        *(p + 2) =  rcvfd;
+
+        int ret = sendmsg(GetCommandSocket(), &msg, 0);
         if (ret == -1)
             PROXY_LOG(ERR) << "Cannot write kNewChannel request";
     }
@@ -941,22 +1018,33 @@ protected:
      * @retval Returns the newly created segment descriptor.
      */
     SegmentDescriptor<SZ>*
-    OpenChannel(std::string name, ChannelSide side)
+    OpenChannel(ChannelSide side)
     {
-        /**
-         * On the child side just unlink the named shared memory, since it is
-         * not needed any more. The parent (client) must have already opened and
-         * mapped it into its address space.
-         */
-        bool auto_unlink_shm {side == kChild};
         /**
          * Calculate the minumum possible size for the shared memory segment.
          */
         std::size_t seg_memsz = div_round_up(sizeof(Segment<SZ>), kPageSize);
 
-        void* m = open_map_shm(name.c_str(), seg_memsz, auto_unlink_shm);
+        auto [m, fd] = open_map_shm(seg_memsz);
         Segment<SZ>* seg = new (m) Segment<SZ>{side == kParent, seg_memsz};
-        auto segd = new SegmentDescriptor<SZ>(name, side, *seg, child_pid_);
+        auto segd = new SegmentDescriptor<SZ>(fd, side, *seg, child_pid_);
+        return segd;
+    }
+
+    SegmentDescriptor<SZ>*
+    OpenChannel(int segfd, int sndfd, int rcvfd, ChannelSide side)
+    {
+        /**
+         * Calculate the minumum possible size for the shared memory segment.
+         */
+        std::size_t seg_memsz = div_round_up(sizeof(Segment<SZ>), kPageSize);
+
+        void* m = open_map_shm(segfd, seg_memsz);
+        int ret = close(segfd);
+        if (ret == -1)
+            PROXY_LOG(DBG) << "Cannot close segfd in child" << std::endl;
+        Segment<SZ>* seg = new (m) Segment<SZ>{side == kParent, seg_memsz};
+        auto segd = new SegmentDescriptor<SZ>(sndfd, rcvfd, side, *seg, child_pid_);
         return segd;
     }
 
@@ -979,7 +1067,10 @@ protected:
              * handle requests of this type.
              */
             case kNewChannel:
-                PROXY_LOG(DBG) << "Child: Got command: kNewChannel - segname: " << cmd->seg_name << std::endl;
+                PROXY_LOG(DBG) << "Child: Got command: kNewChannel - fds: "
+                               << cmd->segfd << " "
+                               << cmd->sndfd << " "
+                               << cmd->rcvfd << std::endl;
                 // Extract the service function from the Command object
                 using WT = void(*)(decltype(this), SegmentDescriptor<SZ>*);
                 WT service_func;
@@ -987,7 +1078,10 @@ protected:
                 // Extract the name of the segment descriptor from the Command
                 // object and open it.
                 SegmentDescriptor<SZ>* segd;
-                segd = OpenChannel(cmd->seg_name, kChild);
+                segd = OpenChannel(cmd->segfd,
+                                   cmd->sndfd,
+                                   cmd->rcvfd,
+                                   kChild);
                 // Start a service thread
                 std::thread* thr;
                 thr = new std::thread{service_func, this, segd};
@@ -1044,7 +1138,29 @@ retry_send_command:
     {
         Command* cmd = new Command{};
 retry_read_command:
-        int ret = read(GetCommandSocket(), static_cast<void*>(cmd), sizeof(Command));
+        struct msghdr msg;
+        struct cmsghdr *cmsghdr;
+        struct iovec iov[1];
+        int* p;
+        union {
+            struct cmsghdr hdr;
+            unsigned char  buf[CMSG_SPACE(sizeof(int) * 3)];
+        } cmsgbuf;
+        iov[0].iov_base = cmd;
+        iov[0].iov_len = sizeof(*cmd);
+        memset(&cmsgbuf.buf, 0x0d, sizeof(cmsgbuf.buf));
+        cmsghdr = &cmsgbuf.hdr;
+        cmsghdr->cmsg_len = CMSG_LEN(sizeof(int) * 3);
+        cmsghdr->cmsg_level = SOL_SOCKET;
+        cmsghdr->cmsg_type = SCM_RIGHTS;
+        msg.msg_name = NULL;
+        msg.msg_namelen = 0;
+        msg.msg_iov = iov;
+        msg.msg_iovlen = sizeof(iov) / sizeof(iov[0]);
+        msg.msg_control = &cmsgbuf.buf;
+        msg.msg_controllen = sizeof(cmsgbuf.buf);
+        msg.msg_flags = 0;
+        int ret = recvmsg(GetCommandSocket(), &msg, 0);
         if (ret == -1) {
             if (errno == EINTR || errno == EWOULDBLOCK) {
                 /**
@@ -1056,6 +1172,10 @@ retry_read_command:
                 throw ChildReadCommandSocketFailed{};
             }
         }
+        p = (int*)CMSG_DATA(cmsghdr);
+        cmd->segfd = *p;
+        cmd->sndfd = *(p + 1);
+        cmd->rcvfd = *(p + 2);
         return std::shared_ptr<Command>(cmd);
     }
 
@@ -1090,9 +1210,6 @@ retry_read_command:
         pid_t pid = fork();
         if (pid == 0) {
             // Child (Server)
-#ifdef __FreeBSD__
-	    cap_enter();
-#endif
             side_ = kChild;
             ActivateLiveCheck();
         } else if (pid > 0) {
@@ -1186,13 +1303,15 @@ public:
         {
             if (!segd_) {
                 PROXY_LOG(DBG) << "+ Creating new segment descriptor." << std::endl;
-                auto shmnam = proxy_->GenerateShMemName();
-                PROXY_LOG(DBG) << "+ New segment descriptor name: " << shmnam << std::endl;
-                segd_ = proxy_->OpenChannel(shmnam, kParent);
+                PROXY_LOG(DBG) << "+ New segment descriptor" << std::endl;
+                segd_ = proxy_->OpenChannel(kParent);
                 stub_ = new Stub<SZ>(*segd_);
                 auto service_func =
                     &AbstractProxyWorkLoopWrapper<decltype(proxy_), SZ, RET, Args...>;
-                proxy_->SendNewChannelInfo(shmnam, service_func);
+                proxy_->SendNewChannelInfo(segd_->GetSegFd(),
+                                           segd_->GetSndFd(),
+                                           segd_->GetRcvFd(),
+                                           service_func);
             } else {
                 PROXY_LOG(DBG) << "Reusing existing segment descriptor." << std::endl;
             }
@@ -1285,10 +1404,11 @@ public:
             } else if (sel == kShutDown) {
                 PROXY_LOG(DBG) << "Parent: Got kShutDown command for Execution instance";
                 executions.erase(iter);
-                execution->Shutdown();
                 for (auto& e : executions)
                     delete std::get<1>(e);
                 executions.clear();
+                execution->Shutdown();
+                delete execution;
                 return RET{};
             }
         }
@@ -1381,7 +1501,7 @@ protected:
 
 private:
     /**
-     * A mapping from Segmen Descriptors to the threads responsible for
+     * A mapping from Segment Descriptors to the threads responsible for
      * handling the requests on that segment.
      */
     std::unordered_map<SegmentDescriptor<SZ>*, std::thread*> threads_;

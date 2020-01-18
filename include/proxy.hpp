@@ -1,5 +1,8 @@
 #pragma once
 
+#if defined(__FreeBSD__) && defined(Proxy_CapabilityMode)
+#include <sys/capsicum.h>
+#endif
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -871,6 +874,16 @@ public:
         status_ = kProxyActive;
     }
 
+    AbstractProxy(std::string soname)
+    {
+#if defined(__FreeBSD__) && defined(Proxy_CapabilityMode)
+	sofd_ = open(soname.c_str(), O_RDONLY, S_IRUSR | S_IXUSR);
+#endif
+        CreateManagementSockets();
+        StartServer();
+        status_ = kProxyActive;
+    }
+
     AbstractProxy(AbstractProxy const& ap) = delete;
     AbstractProxy(AbstractProxy&& ap) = delete;
     AbstractProxy& operator=(AbstractProxy const& ap) = delete;
@@ -1211,6 +1224,9 @@ retry_read_command:
         if (pid == 0) {
             // Child (Server)
             side_ = kChild;
+#if defined(__FreeBSD__) && defined(Proxy_CapabilityMode)
+	    cap_enter();
+#endif
             ActivateLiveCheck();
         } else if (pid > 0) {
             // Parent (Client)
@@ -1491,6 +1507,13 @@ protected:
      * Channel 1: Child  --> Parent
      */
     int cmd_ch_[2];
+    /**
+     * A file descriptor to the DSO file. This will be used to load the
+     * DSO via fdlopen()
+     */
+#if defined(__FreeBSD__) && defined(Proxy_CapabilityMode)
+    int sofd_;
+#endif
 
     enum PorxyStatus {
         kProxyShutDown,
@@ -1551,15 +1574,24 @@ template <std::size_t SZ>
 class ProxySO final: public detail::AbstractProxy<ProxySO<SZ>, SZ> {
 public:
     ProxySO(std::string soname)
-        : detail::AbstractProxy<ProxySO, SZ>{}
+        : detail::AbstractProxy<ProxySO, SZ>{soname}
     {
         using namespace detail;
         PROXY_LOG(DBG) << "Going to dlopen '" << soname << "'" << std::endl;
-        handle_ = dlopen(soname.c_str(), RTLD_LOCAL | RTLD_NOW);
-        if (!handle_) {
-            PROXY_LOG(ERR) << "Failed to open DSO!" << std::endl;
-            throw OpeningDSOFailed{};
-        }
+	if (this->side_ == kChild) {
+#if defined(__FreeBSD__) && defined(Proxy_CapabilityMode)
+		handle_ = fdlopen(this->sofd_, RTLD_LOCAL | RTLD_NOW);
+#else
+		handle_ = dlopen(soname.c_str(), RTLD_LOCAL | RTLD_NOW);
+#endif
+		if (!handle_) {
+		    PROXY_LOG(ERR) << "Failed to open DSO!" << std::endl;
+		    throw OpeningDSOFailed{};
+		}
+	}
+#if defined(__FreeBSD__) && defined(Proxy_CapabilityMode)
+	close(this->sofd_);
+#endif
     }
 
     /**

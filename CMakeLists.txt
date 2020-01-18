@@ -16,6 +16,12 @@ find_package(Threads)
 find_program(MAKE_EXE NAMES make)
 find_program(GIT_EXE NAMES git)
 
+option(UseCapsicum "Enable use of capability mode in FreeBSD" ON)
+
+if(UseCapsicum)
+	add_definitions(-DProxy_CapabilityMode)
+endif()
+
 enable_testing()
 
 add_compile_options(

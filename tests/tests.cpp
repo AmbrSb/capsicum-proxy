@@ -125,7 +125,6 @@ TEST(ProxyTest, TooLargeStringParametersForSZ) {
     largestr[S - 1] = 0;
     EXPECT_THROW(p.Execute<std::string>(std::string{largestr}),
                  capsiproxy::SendBufferOverflow);
-    p.Stop<std::string>(""s);
 }
 
 TEST(ProxyTest, StringReturnTest) {

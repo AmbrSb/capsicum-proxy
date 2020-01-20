@@ -57,6 +57,10 @@ class OpeningDSOFailed:                         public std::exception {};
 class DSOFunctionLookupFailed:                  public std::exception {};
 class InvalidProxyState:                        public std::exception {};
 class BadSegment:                               public std::exception {};
+class SharedMemoryCreationInParentFailed:       public std::exception {};
+class SharedMemoryUnlinkingInParentFailed:       public std::exception {};
+class QueryFailed:                               public std::exception {};
+
 
 namespace detail {
 
@@ -66,11 +70,12 @@ enum ExitCodes {
     EC_SHM_SEG_TRUNCATE                 = 20,
     EC_SHM_SEG_MAP                      = 30,
     EC_SHM_SEG_UNLINK                   = 40,
-    EC_SIGNAL_LIVECHECL_INSTALLATION    = 50,
+    EC_SIGNAL_LIVECHECK_INSTALLATION    = 50,
     EC_MAN_SOCK_WRITE_SHUTDOWN          = 60,
     EC_CHILD_LOOP_TERMINATED            = 70,
     EC_SOCKETPAIR_CREATION              = 80,
     EC_FORK_FAILED                      = 90,
+    EC_ChildLoopFinishedWithError       = 100,
 };
 
 class NullBuffer : public std::streambuf
@@ -136,6 +141,11 @@ bool has_parent_terminated()
      return getppid() == 1;
 }
 
+/**
+ * This is used by the child (server) process to verify that its parent
+ * (client) process is still running, and exits the child process
+ * otherwise with an exit code of EC_SIGNALO_LIVECHECK_INSTALLATION.
+ */
 extern "C"
 void
 sig_livecheck_handler(int signo)
@@ -143,7 +153,7 @@ sig_livecheck_handler(int signo)
     if (has_parent_terminated())
     {
         PROXY_LOG(INF) << "Child: parent terminated.";
-        exit(EC_SIGNAL_LIVECHECL_INSTALLATION);
+        exit(EC_SIGNAL_LIVECHECK_INSTALLATION);
     }
 }
 
@@ -238,14 +248,14 @@ open_map_shm(std::size_t sz)
     if (fd == -1) {
         PROXY_LOG(ERR) << "Cannot create shared memory for segment";
         PROXY_LOG(ERR) << "shm_open: " << strerror(errno) << std::endl;
-        exit(EC_SHM_SEG_CREATE);
+        throw SharedMemoryCreationInParentFailed{};
     }
     auto ptr = open_map_shm(fd, sz);
     int ret = shm_unlink(name.c_str());
     if (ret) {
         PROXY_LOG(ERR) << "Cannot unlink the shared memory of segment";
         PROXY_LOG(ERR) << "shm_unlink: " << strerror(errno) << std::endl;
-        exit(EC_SHM_SEG_UNLINK);
+        throw SharedMemoryUnlinkingInParentFailed{};
     }
     return std::make_tuple(ptr, fd);
 }
@@ -259,8 +269,9 @@ has_child_terminated(pid_t cp)
 {
     int status;
     int ret = waitpid(cp, &status, WNOHANG);
-    if (ret > 0 && (WIFEXITED(status) || WIFSIGNALED(status) || WIFSTOPPED(status)))
+    if (ret > 0 && (WIFEXITED(status) || WIFSIGNALED(status) || WIFSTOPPED(status))) {
         return true;
+    }
     return false;
 }
 
@@ -368,8 +379,7 @@ public:
     friend class SegmentDescriptor<SZ>;
 
     Segment(bool init_turn, std::size_t memsz)
-        : autounmap_{this, memsz},
-          turn_{init_turn ? kParent : turn_},
+        : turn_{init_turn ? kParent : turn_},
           chan_sz_{SZ},
           memsz_{memsz}
     {
@@ -500,26 +510,6 @@ private:
         return magic_ == kSegmentMagic;
     }
 
-    /**
-     * This s a RAII style class used to automatically unmap a shared memory segment
-     * upon destruction of its owner (Segment in this case).
-     */
-    class AutoUnmapper {
-    public:
-        AutoUnmapper(void* ptr, std::size_t sz)
-            : ptr_{ptr}, sz_{sz} {}
-        ~AutoUnmapper()
-        {
-            PROXY_LOG(DBG) << "unmap segment memory";
-            int ret = munmap(ptr_, sz_);
-            if (ret)
-                PROXY_LOG(DBG) << "Cannot unmap channel memory: " << strerror(errno);
-        }
-    private:
-        void* ptr_;
-        std::size_t sz_;
-    };
-
     enum SegmentStatus {
         kActive,
         /**
@@ -530,7 +520,6 @@ private:
         kRequestHangUp,
     };
 
-    AutoUnmapper autounmap_;
     volatile ChannelSide turn_;
     uint32_t             magic_ = kSegmentMagic;
     std::size_t          chan_sz_;
@@ -707,6 +696,7 @@ public:
                     throw ChildTerminated{};
                 }
             }
+            PROXY_LOG(DBG) << "-------------------- Child Termination Status Code: " << std::endl;
         } else if (side_ == kChild) {
             while(segment_.turn_ == kParent) {
                 _mm_pause();
@@ -935,10 +925,15 @@ public:
      * just returns without blocking.
      */
     void
-    BlockChildOnCommandLoop()
+    BlockChildOnCommandLoop() noexcept
     {
-        if (side_ == kChild)
-            CommandServerLoop();
+        if (side_ == kChild) {
+            try {
+                CommandServerLoop();
+            } catch (...) {
+                exit(EC_ChildLoopFinishedWithError);
+            }
+        }
     }
 
     /**
@@ -1428,8 +1423,17 @@ public:
                 return RET{};
             }
         }
-        if (sel == kQuery)
-            return execution->_(args...);
+        if (sel == kQuery) {
+            try {
+                return execution->_(args...);
+            } catch (...) {
+                auto iter = executions.find(this);
+                executions.erase(iter);
+                execution->Shutdown();
+                delete execution;
+                throw;
+            }
+        }
     }
 
     /**
@@ -1445,8 +1449,12 @@ public:
     RET
     Execute(Args... args)
     {
-        static_assert(CalcBufSize<Args...>() <= SZ, "SZ is too small for Args");
-        static_assert(CalcBufSize<RET>() <= SZ, "SZ is too small for RET");
+        /**
+         * Compile-time check to ensure that the selected buffer size SZ is
+         * sufficient for the provided argument and return types.
+         */
+        static_assert(CalcBufSize<Args...>() <= SZ  , "SZ is too small for Args");
+        static_assert(CalcBufSize<RET>() <= SZ      , "SZ is too small for RET");
 
         if (status_ != kProxyActive)
             throw InvalidProxyState{};
@@ -1683,6 +1691,7 @@ public:
     {
         auto proxy = new ProxyDirect<SZ, SERV>{};
         proxy->BlockChildOnCommandLoop();
+        // Unreachable in server (child) process
         return *proxy;
     }
 
@@ -1700,6 +1709,7 @@ public:
     {
         auto proxy = new ProxySO<SZ>{dso_path};
         proxy->BlockChildOnCommandLoop();
+        // Unreachable in server (child) process
         return *proxy;
     }
 

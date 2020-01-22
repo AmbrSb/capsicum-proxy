@@ -60,8 +60,9 @@ class BadSegment:                               public std::exception {};
 class SharedMemoryCreationInParentFailed:       public std::exception {};
 class SharedMemoryUnlinkingInParentFailed:      public std::exception {};
 class QueryFailed:                              public std::exception {};
-class WritingToCommandSocketFailed:             public std::exception {};
 class CreatingSocketPairFailed:                 public std::exception {};
+class WritingToCommandSocketFailed:             public std::exception {};
+class SendChannelInfoFailed:                    public std::exception {};
 class ForkFailed:                               public std::exception {};
 
 namespace detail {
@@ -1001,6 +1002,37 @@ public:
 
 protected:
 
+#define MESSAGE_HEADER_COMMON_SETUP(c,m)                          \
+            cmsghdr *cmsghdr;                                     \
+            iovec iov[1];                                         \
+            union {                                               \
+                struct cmsghdr hdr;                               \
+                unsigned char  buf[CMSG_SPACE(sizeof(int) * 3)];  \
+            } cmsgbuf;                                            \
+            iov[0].iov_base = &c;                                 \
+            iov[0].iov_len = sizeof(c);                           \
+            memset(&cmsgbuf.buf, 0x0d, sizeof(cmsgbuf.buf));      \
+            cmsghdr = &cmsgbuf.hdr;                               \
+            cmsghdr->cmsg_len = CMSG_LEN(sizeof(int) * 3);        \
+            cmsghdr->cmsg_level = SOL_SOCKET;                     \
+            cmsghdr->cmsg_type = SCM_RIGHTS;                      \
+            m.msg_name = NULL;                                    \
+            m.msg_namelen = 0;                                    \
+            m.msg_iov = iov;                                      \
+            m.msg_iovlen = sizeof(iov) / sizeof(iov[0]);          \
+            m.msg_control = &cmsgbuf.buf;                         \
+            m.msg_controllen = sizeof(cmsgbuf.buf);               \
+            m.msg_flags = 0;
+
+    void SetUpMessageHeader(msghdr& msg, Command& cmd, int segfd, int sndfd, int rcvfd) const noexcept
+    {
+        MESSAGE_HEADER_COMMON_SETUP(cmd,msg);
+        int* p = reinterpret_cast<int*>(CMSG_DATA(cmsghdr));
+        *p       =  segfd;
+        *(p + 1) =  sndfd;
+        *(p + 2) =  rcvfd;
+    }
+
     /**
      * Inform the server (child) process that it should open a new communication
      * channel to serve a new type of function type.
@@ -1017,43 +1049,18 @@ protected:
      */
     template<typename SFUNC>
     void
-    SendNewChannelInfo(int segfd, int sndfd, int rcvfd, SFUNC service_func) const noexcept
+    SendNewChannelInfo(int segfd, int sndfd, int rcvfd, SFUNC service_func) const
     {
         Command cmd;
         cmd.service_func = reinterpret_cast<void*>(service_func);
         cmd.code = kNewChannel;
-
-        struct msghdr msg;
-        struct cmsghdr *cmsghdr;
-        struct iovec iov[1];
-        int* p;
-        union {
-            struct cmsghdr hdr;
-            unsigned char  buf[CMSG_SPACE(sizeof(int) * 3)];
-        } cmsgbuf;
-
-        iov[0].iov_base = &cmd;
-        iov[0].iov_len = sizeof(cmd);
-        memset(&cmsgbuf.buf, 0x0b, sizeof(cmsgbuf.buf));
-        cmsghdr = &cmsgbuf.hdr;
-        cmsghdr->cmsg_len = CMSG_LEN(sizeof(int) * 3);
-        cmsghdr->cmsg_level = SOL_SOCKET;
-        cmsghdr->cmsg_type = SCM_RIGHTS;
-        msg.msg_name = NULL;
-        msg.msg_namelen = 0;
-        msg.msg_iov = iov;
-        msg.msg_iovlen = sizeof(iov) / sizeof(iov[0]);
-        msg.msg_control = cmsghdr;
-        msg.msg_controllen = sizeof(cmsgbuf.buf);
-        msg.msg_flags = 0;
-        p = (int*)CMSG_DATA(cmsghdr);
-        *p       =  segfd;
-        *(p + 1) =  sndfd;
-        *(p + 2) =  rcvfd;
-
+        msghdr msg;
+        SetUpMessageHeader(msg, cmd, segfd, sndfd, rcvfd);
         int ret = PXNOINT(sendmsg(GetCommandSocket(), &msg, 0));
-        if (ret == -1)
+        if (ret == -1) {
             PROXY_LOG(ERR) << "Cannot write kNewChannel request";
+            throw SendChannelInfoFailed{};
+        }
     }
 
     /**
@@ -1111,7 +1118,7 @@ protected:
         PROXY_LOG(DBG) << "Starting command loop for child." << std::endl;
         while (true) {
             auto cmd = WaitForCommand();
-            switch (cmd->code)
+            switch (cmd.code)
             {
             /**
              * This command shows that a function of a specific type has been
@@ -1121,19 +1128,19 @@ protected:
              */
             case kNewChannel:
                 PROXY_LOG(DBG) << "Child: Got command: kNewChannel - fds: "
-                               << cmd->segfd << " "
-                               << cmd->sndfd << " "
-                               << cmd->rcvfd << std::endl;
+                               << cmd.segfd << " "
+                               << cmd.sndfd << " "
+                               << cmd.rcvfd << std::endl;
                 // Extract the service function from the Command object
                 using WT = void(*)(decltype(this), SegmentDescriptor<SZ>*);
                 WT service_func;
-                service_func = reinterpret_cast<WT>(cmd->service_func);
+                service_func = reinterpret_cast<WT>(cmd.service_func);
                 // Extract the name of the segment descriptor from the Command
                 // object and open it.
                 SegmentDescriptor<SZ>* segd;
-                segd = OpenChannel(cmd->segfd,
-                                   cmd->sndfd,
-                                   cmd->rcvfd,
+                segd = OpenChannel(cmd.segfd,
+                                   cmd.sndfd,
+                                   cmd.rcvfd,
                                    kChild);
                 // Start a service thread
                 std::thread* thr;
@@ -1171,14 +1178,10 @@ protected:
     void
     SendCommand(Command const& cmd) const
     {
-retry_send_command:
         int ret = PXNOINT(write(GetCommandSocket(), reinterpret_cast<void const*>(&cmd), sizeof(cmd)));
         if (ret == -1) {
-            if (errno == EINTR || errno == EWOULDBLOCK) {
-                goto retry_send_command;
-            } else {
+                PROXY_LOG(INF) << "Client: Writing to command socket failed." << std::endl;
                 throw ParentWrite2CommandSocketFailed{};
-            }
         }
     }
 
@@ -1186,50 +1189,22 @@ retry_send_command:
      * The child (server) process call this method to block and wait for management
      * commands from the parent (client) process.
      */
-    std::shared_ptr<Command>
+    Command
     WaitForCommand() const
     {
-        Command* cmd = new Command{};
-retry_read_command:
-        struct msghdr msg;
-        struct cmsghdr *cmsghdr;
-        struct iovec iov[1];
-        int* p;
-        union {
-            struct cmsghdr hdr;
-            unsigned char  buf[CMSG_SPACE(sizeof(int) * 3)];
-        } cmsgbuf;
-        iov[0].iov_base = cmd;
-        iov[0].iov_len = sizeof(*cmd);
-        memset(&cmsgbuf.buf, 0x0d, sizeof(cmsgbuf.buf));
-        cmsghdr = &cmsgbuf.hdr;
-        cmsghdr->cmsg_len = CMSG_LEN(sizeof(int) * 3);
-        cmsghdr->cmsg_level = SOL_SOCKET;
-        cmsghdr->cmsg_type = SCM_RIGHTS;
-        msg.msg_name = NULL;
-        msg.msg_namelen = 0;
-        msg.msg_iov = iov;
-        msg.msg_iovlen = sizeof(iov) / sizeof(iov[0]);
-        msg.msg_control = &cmsgbuf.buf;
-        msg.msg_controllen = sizeof(cmsgbuf.buf);
-        msg.msg_flags = 0;
+        Command cmd;
+        msghdr msg;
+        MESSAGE_HEADER_COMMON_SETUP(cmd,msg);
         int ret = PXNOINT(recvmsg(GetCommandSocket(), &msg, 0));
         if (ret == -1) {
-            if (errno == EINTR || errno == EWOULDBLOCK) {
-                /**
-                 * EINTR might be a result of the periodic SIGALRM we send to self
-                 * allow the server process to wake up for housekeeping purposes.
-                 */
-                goto retry_read_command;
-            } else {
-                throw ChildReadCommandSocketFailed{};
-            }
+            PROXY_LOG(ERR) << "Cannot read from kNewChannel request" << std::endl;
+            throw ChildReadCommandSocketFailed{};
         }
-        p = (int*)CMSG_DATA(cmsghdr);
-        cmd->segfd = *p;
-        cmd->sndfd = *(p + 1);
-        cmd->rcvfd = *(p + 2);
-        return std::shared_ptr<Command>(cmd);
+        int* p = reinterpret_cast<int*>(CMSG_DATA(cmsghdr));
+        cmd.segfd = *p;
+        cmd.sndfd = *(p + 1);
+        cmd.rcvfd = *(p + 2);
+        return cmd;
     }
 
     int

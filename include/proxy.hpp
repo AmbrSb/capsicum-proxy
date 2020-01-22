@@ -379,13 +379,15 @@ public:
     friend class SegmentDescriptor<SZ>;
 
     Segment(bool init_turn, std::size_t memsz)
-        : turn_{init_turn ? kParent : turn_},
-          chan_sz_{SZ},
+        : chan_sz_{SZ},
           memsz_{memsz}
     {
-        if (!init_turn)
+        if (!init_turn) {
             if (!VerifyIntegrity())
                 throw BadSegment{};
+        } else {
+            turn_ = kParent;
+        }
     }
 
     Segment(Segment const& s) = delete;
@@ -696,7 +698,6 @@ public:
                     throw ChildTerminated{};
                 }
             }
-            PROXY_LOG(DBG) << "-------------------- Child Termination Status Code: " << std::endl;
         } else if (side_ == kChild) {
             while(segment_.turn_ == kParent) {
                 _mm_pause();
@@ -874,7 +875,19 @@ public:
         status_ = kProxyActive;
     }
 
-    AbstractProxy(AbstractProxy const& ap) = delete;
+    ~AbstractProxy()
+    {
+        using EXEMAPTYPE = std::unordered_map<void*, void*>;
+        for (auto kv : all_executions) {
+            auto v = reinterpret_cast<EXEMAPTYPE*>(kv.second);
+            auto iter = v->find(this);
+            if (iter != v->end()) {
+                v->erase(iter);
+            }
+        }
+    }
+
+    AbstractProxy(AbstractProxy const& ap) = default;
     AbstractProxy(AbstractProxy&& ap) = delete;
     AbstractProxy& operator=(AbstractProxy const& ap) = delete;
     AbstractProxy& operator=(AbstractProxy&& ap) = delete;
@@ -1391,33 +1404,48 @@ public:
         kShutDown,
     };
 
+    uint64_t
+    GenerateExecutionId()
+    {
+        return rand();
+    }
+
     template <typename RET, typename... Args>
     RET
     ExecuteInternal(Selector sel, Args... args)
     {
-        static std::unordered_map<decltype(this), Execution<AbstractProxy<SUB, SZ>, RET, Args...>*> executions{};
-        Execution<AbstractProxy<SUB, SZ>, RET, Args...>* execution = nullptr;
-        auto iter = executions.find(this);
-        if (iter == executions.end()) {
+        using EXETYPE = Execution<AbstractProxy<SUB, SZ>, RET, Args...>;
+        using EXEMAPTYPE = std::unordered_map<void*, void*>;
+        static bool first_run = true;
+        static uint64_t unique_id = GenerateExecutionId();
+        if (first_run) {
+            first_run = false;
+            static EXEMAPTYPE* executions = new EXEMAPTYPE{};
+            all_executions.insert({unique_id, static_cast<void*>(executions)});
+        }
+        auto executions = reinterpret_cast<EXEMAPTYPE*>(std::get<1>(*(all_executions.find(unique_id))));
+        EXETYPE* execution = nullptr;
+        auto iter = executions->find(this);
+        if (iter == executions->end()) {
             if (sel == kQuery) {
-                execution = new Execution<AbstractProxy<SUB, SZ>, RET, Args...>{this};
-                executions.insert({this, execution});
+                execution = new EXETYPE{this};
+                executions->insert({this, execution});
             } else
                 throw TriedToStopNonExistentSegmentDescriptor{};
         } else {
-            execution = std::get<1>(*iter);
+            execution = reinterpret_cast<EXETYPE*>(std::get<1>(*iter));
             if (sel == kStop) {
                 PROXY_LOG(DBG) << "Parent: Got kStop command for Execution instance";
-                executions.erase(iter);
-                PROXY_LOG(DBG) << "executions count: " << executions.size() << std::endl;
+                executions->erase(iter);
+                PROXY_LOG(DBG) << "executions count: " << executions->size() << std::endl;
                 delete execution;
                 return RET{};
             } else if (sel == kShutDown) {
                 PROXY_LOG(DBG) << "Parent: Got kShutDown command for Execution instance";
-                executions.erase(iter);
-                for (auto& e : executions)
-                    delete std::get<1>(e);
-                executions.clear();
+                executions->erase(iter);
+                for (auto& e : *executions)
+                    delete reinterpret_cast<EXETYPE*>(std::get<1>(e));
+                executions->clear();
                 execution->Shutdown();
                 delete execution;
                 return RET{};
@@ -1427,8 +1455,8 @@ public:
             try {
                 return execution->_(args...);
             } catch (...) {
-                auto iter = executions.find(this);
-                executions.erase(iter);
+                auto iter = executions->find(this);
+                executions->erase(iter);
                 execution->Shutdown();
                 delete execution;
                 throw;
@@ -1536,6 +1564,7 @@ private:
      * handling the requests on that segment.
      */
     std::unordered_map<SegmentDescriptor<SZ>*, std::thread*> threads_;
+    inline static std::unordered_map<uint64_t, void*> all_executions{};
 };
 
 } // End of namespace 'detail'
@@ -1686,13 +1715,13 @@ public:
      * in a service loop that receives request from the parent (client) instance
      * and returns the response.
      */
-    static ProxyDirect<SZ, SERV>&
+    static ProxyDirect<SZ, SERV>
     Build()
     {
-        auto proxy = new ProxyDirect<SZ, SERV>{};
-        proxy->BlockChildOnCommandLoop();
+        auto proxy {ProxyDirect<SZ, SERV>{}};
+        proxy.BlockChildOnCommandLoop();
         // Unreachable in server (child) process
-        return *proxy;
+        return proxy;
     }
 
     /**
@@ -1704,13 +1733,13 @@ public:
      * in a service loop that receives request from the parent (client) instance
      * and returns the response.
      */
-    static ProxySO<SZ>&
+    static ProxySO<SZ>
     Build(std::string dso_path)
     {
-        auto proxy = new ProxySO<SZ>{dso_path};
-        proxy->BlockChildOnCommandLoop();
+        auto proxy {ProxySO<SZ>{dso_path}};
+        proxy.BlockChildOnCommandLoop();
         // Unreachable in server (child) process
-        return *proxy;
+        return proxy;
     }
 
 };

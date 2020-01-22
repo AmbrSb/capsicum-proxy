@@ -37,6 +37,9 @@ using Ret4 = int;
 using Req5 = std::tuple<int>;
 using Ret5 = int;
 
+using Req6 = std::tuple<int, int>;
+using Ret6 = double;
+
 
 class Service {
 public:
@@ -72,6 +75,13 @@ public:
         return res;
     }
 
+    Ret6
+    Handle(Req6& tup) {
+        auto res = _(0) + _(1) + 0.1;
+        return res;
+    }
+
+
 #undef _
 #undef _res
 };
@@ -79,32 +89,35 @@ public:
 using namespace capsiproxy;
 
 TEST(ProxyTest, NumericTest) {
-    auto& p = Proxy<4096, Service>::Build();
+    auto p = Proxy<4096, Service>::Build();
     auto result = p.Execute<int>(16);
     ASSERT_EQ(result, 17);
     auto result2 = p.Execute<double>(7, 19, 23);
     ASSERT_EQ(result2, 49.78);
-    p.Shutdown<int>(0);
+    p.Shutdown<double>(0, 0, 0);
+    // p.Shutdown<int>(0);
 }
 
 TEST(ProxyTest, NumericTest2) {
-    auto& p = Proxy<4096, Service>::Build();
+    auto p = Proxy<4096, Service>::Build();
     auto result = p.Execute<double>(1, 10, 34);
     ASSERT_EQ(result, 45.78);
+    auto result2 = p.Execute<double>(123, 9);
+    ASSERT_EQ(result2, 132.1);
     result = p.Execute<double>(17, 29, 33);
     ASSERT_EQ(result, 79.78);
     p.Shutdown<double>(0, 0, 0);
 }
 
 TEST(ProxyTest, StringTest) {
-    auto& p = Proxy<4096, Service>::Build();
+    auto p = Proxy<4096, Service>::Build();
     auto result = p.Execute<std::size_t>(9, "hello"s);
     ASSERT_EQ(result, 14);
     p.Shutdown<std::size_t>(0, ""s);
 }
 
 TEST(ProxyTest, OperationAfterShutdownShouldThrow) {
-    auto& p = Proxy<4096, Service>::Build();
+    auto p = Proxy<4096, Service>::Build();
     auto result = p.Execute<std::size_t>(9, "hello"s);
     ASSERT_EQ(result, 14);
     p.Shutdown<std::size_t>(0, ""s);
@@ -117,7 +130,7 @@ TEST(ProxyTest, OperationAfterShutdownShouldThrow) {
 }
 
 TEST(ProxyTest, TooLargeStringParametersForSZ) {
-    auto& p = Proxy<4096, Service>::Build();
+    auto p = Proxy<4096, Service>::Build();
     constexpr int S = 5000;
     char* largestr = new char[S];
     for (std::size_t s = 0; s < S; s++)
@@ -128,7 +141,7 @@ TEST(ProxyTest, TooLargeStringParametersForSZ) {
 }
 
 TEST(ProxyTest, StringReturnTest) {
-    auto& p = Proxy<4096, Service>::Build();
+    auto p = Proxy<4096, Service>::Build();
     auto result = p.Execute<std::string>("hello_2"s);
     ASSERT_STREQ(result.c_str(), "return:hello_2");
     p.Stop<std::string>(""s);
@@ -137,7 +150,7 @@ TEST(ProxyTest, StringReturnTest) {
 }
 
 TEST(ProxyDLOAPITest, NumericTest) {
-    auto& p = Proxy<4096>::Build("./libtest.so");
+    auto p = Proxy<4096>::Build("./libtest.so");
     auto result = p.Execute<int>("add"s, 20, 30);
     ASSERT_EQ(result, 50);
     result = p.Execute<int>("add"s, 163, 9);

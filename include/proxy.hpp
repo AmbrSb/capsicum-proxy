@@ -34,6 +34,7 @@
 #include <string.h>
 #include <signal.h>
 
+#define PXNOINT(c) ({ int _ret; do { _ret = (c); } while (_ret == -1 && errno == EINTR); _ret; })
 
 #define PROXY_LOG(c) PROXY_LOG_##c
 #define PROXY_LOG_ERR std::cerr
@@ -282,7 +283,7 @@ bool
 has_child_terminated(pid_t cp) noexcept
 {
     int status;
-    int ret = waitpid(cp, &status, WNOHANG);
+    int ret = PXNOINT(waitpid(cp, &status, WNOHANG));
     if (ret > 0 && (WIFEXITED(status) || WIFSIGNALED(status) || WIFSTOPPED(status))) {
         return true;
     }
@@ -346,7 +347,7 @@ public:
         if (fd_ < 0)
             return;
         PROXY_LOG(DBG) << "Destructing channel. fd: " << fd_ << std::endl;
-        int ret = close(fd_);
+        int ret = PXNOINT(close(fd_));
         if (ret) {
             PROXY_LOG(ERR) << "Cannot close fd " << fd_ << std::endl;
         }
@@ -609,7 +610,7 @@ public:
         Switch();
         segment_.~Segment();
         if (fd_ > -1) {
-            close(fd_);
+            PXNOINT(close(fd_));
         }
     }
 
@@ -991,7 +992,7 @@ public:
         Command cmd;
         cmd.code = kShutDownRequest;
         PROXY_LOG(DBG) << "Going to send Shutdown request to child" << std::endl;
-        int ret = write(GetCommandSocket(), &cmd, sizeof(cmd));
+        int ret = PXNOINT(write(GetCommandSocket(), &cmd, sizeof(cmd)));
         if (ret == -1) {
             PROXY_LOG(ERR) << "Cannot write kShutdown request";
             throw WritingToCommandSocketFailed{};
@@ -1050,7 +1051,7 @@ protected:
         *(p + 1) =  sndfd;
         *(p + 2) =  rcvfd;
 
-        int ret = sendmsg(GetCommandSocket(), &msg, 0);
+        int ret = PXNOINT(sendmsg(GetCommandSocket(), &msg, 0));
         if (ret == -1)
             PROXY_LOG(ERR) << "Cannot write kNewChannel request";
     }
@@ -1092,7 +1093,7 @@ protected:
         std::size_t seg_memsz = div_round_up(sizeof(Segment<SZ>), kPageSize);
 
         void* m = open_map_shm(segfd, seg_memsz);
-        int ret = close(segfd);
+        int ret = PXNOINT(close(segfd));
         if (ret == -1)
             PROXY_LOG(DBG) << "Cannot close segfd in child" << std::endl;
         Segment<SZ>* seg = new (m) Segment<SZ>{side == kParent, seg_memsz};
@@ -1171,7 +1172,7 @@ protected:
     SendCommand(Command const& cmd) const
     {
 retry_send_command:
-        int ret = write(GetCommandSocket(), reinterpret_cast<void const*>(&cmd), sizeof(cmd));
+        int ret = PXNOINT(write(GetCommandSocket(), reinterpret_cast<void const*>(&cmd), sizeof(cmd)));
         if (ret == -1) {
             if (errno == EINTR || errno == EWOULDBLOCK) {
                 goto retry_send_command;
@@ -1212,7 +1213,7 @@ retry_read_command:
         msg.msg_control = &cmsgbuf.buf;
         msg.msg_controllen = sizeof(cmsgbuf.buf);
         msg.msg_flags = 0;
-        int ret = recvmsg(GetCommandSocket(), &msg, 0);
+        int ret = PXNOINT(recvmsg(GetCommandSocket(), &msg, 0));
         if (ret == -1) {
             if (errno == EINTR || errno == EWOULDBLOCK) {
                 /**
@@ -1658,7 +1659,7 @@ public:
 		}
 	}
 #if defined(__FreeBSD__) && defined(Proxy_CapabilityMode)
-	close(this->sofd_);
+	PXNOINT(close(this->sofd_));
 #endif
     }
 

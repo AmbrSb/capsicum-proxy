@@ -62,7 +62,6 @@ add_executable(${PROJECT_NAME}_test
         ${PROJECT_SOURCE_DIR}/include/proxy.hpp
         )
 target_link_libraries(${PROJECT_NAME}_test
-                      glog
                       gtest_main
                       dl
                       rt

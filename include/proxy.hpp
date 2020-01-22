@@ -139,7 +139,7 @@ struct remove_first_type<std::tuple<T, Ts...>>
  * x, and is a multiple of y
  */
 inline std::size_t
-div_round_up(int x, int y) noexcept
+div_round_up(std::size_t x, std::size_t y) noexcept
 {
     return y * (1 + (x - 1) / y);
 }

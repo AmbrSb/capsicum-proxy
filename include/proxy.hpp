@@ -1002,15 +1002,13 @@ public:
 
 protected:
 
-#define MESSAGE_HEADER_COMMON_SETUP(c,m)                          \
-            cmsghdr *cmsghdr;                                     \
-            iovec iov[1];                                         \
+#define MESSAGE_HEADER_COMMON_SETUP(c,m,iov)                      \
+        cmsghdr *cmsghdr;                                         \
+        do {                                                      \
             union {                                               \
                 struct cmsghdr hdr;                               \
                 unsigned char  buf[CMSG_SPACE(sizeof(int) * 3)];  \
             } cmsgbuf;                                            \
-            iov[0].iov_base = &c;                                 \
-            iov[0].iov_len = sizeof(c);                           \
             memset(&cmsgbuf.buf, 0x0d, sizeof(cmsgbuf.buf));      \
             cmsghdr = &cmsgbuf.hdr;                               \
             cmsghdr->cmsg_len = CMSG_LEN(sizeof(int) * 3);        \
@@ -1019,19 +1017,11 @@ protected:
             m.msg_name = NULL;                                    \
             m.msg_namelen = 0;                                    \
             m.msg_iov = iov;                                      \
-            m.msg_iovlen = sizeof(iov) / sizeof(iov[0]);          \
+            m.msg_iovlen = 1;                                     \
             m.msg_control = &cmsgbuf.buf;                         \
             m.msg_controllen = sizeof(cmsgbuf.buf);               \
-            m.msg_flags = 0;
-
-    void SetUpMessageHeader(msghdr& msg, Command& cmd, int segfd, int sndfd, int rcvfd) const noexcept
-    {
-        MESSAGE_HEADER_COMMON_SETUP(cmd,msg);
-        int* p = reinterpret_cast<int*>(CMSG_DATA(cmsghdr));
-        *p       =  segfd;
-        *(p + 1) =  sndfd;
-        *(p + 2) =  rcvfd;
-    }
+            m.msg_flags = 0;                                      \
+        } while (0)
 
     /**
      * Inform the server (child) process that it should open a new communication
@@ -1055,10 +1045,17 @@ protected:
         cmd.service_func = reinterpret_cast<void*>(service_func);
         cmd.code = kNewChannel;
         msghdr msg;
-        SetUpMessageHeader(msg, cmd, segfd, sndfd, rcvfd);
+        iovec iov[1];
+        iov[0].iov_base = &cmd;
+        iov[0].iov_len = sizeof(cmd);
+        MESSAGE_HEADER_COMMON_SETUP(cmd,msg,iov);
+        int* p = reinterpret_cast<int*>(CMSG_DATA(cmsghdr));
+        *p       =  segfd;
+        *(p + 1) =  sndfd;
+        *(p + 2) =  rcvfd;
         int ret = PXNOINT(sendmsg(GetCommandSocket(), &msg, 0));
         if (ret == -1) {
-            PROXY_LOG(ERR) << "Cannot write kNewChannel request";
+            PROXY_LOG(ERR) << "Cannot write kNewChannel request: " << errno << std::endl;
             throw SendChannelInfoFailed{};
         }
     }
@@ -1194,7 +1191,10 @@ protected:
     {
         Command cmd;
         msghdr msg;
-        MESSAGE_HEADER_COMMON_SETUP(cmd,msg);
+        iovec iov[1];
+        iov[0].iov_base = &cmd;
+        iov[0].iov_len = sizeof(cmd);
+        MESSAGE_HEADER_COMMON_SETUP(cmd,msg,iov);
         int ret = PXNOINT(recvmsg(GetCommandSocket(), &msg, 0));
         if (ret == -1) {
             PROXY_LOG(ERR) << "Cannot read from kNewChannel request" << std::endl;
@@ -1205,7 +1205,7 @@ protected:
         cmd.sndfd = *(p + 1);
         cmd.rcvfd = *(p + 2);
         return cmd;
-    }
+      }
 
     int
     GetCommandSocket() const

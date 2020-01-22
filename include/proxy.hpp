@@ -113,9 +113,22 @@ constexpr std::size_t  kPageSize     = 4098;
  * by the implemenation.
  */
 inline namespace utils {
-inline bool has_parent_terminated();
+inline bool has_parent_terminated() noexcept;
 std::tuple<void*, int> open_map_shm(std::size_t sz);
-void* open_map_shm(int fd, std::size_t sz);
+void* open_map_shm(int fd, std::size_t sz) noexcept;
+std::tuple<void*, int> open_map_shm(std::size_t sz);
+std::string GenerateRandomString(std::string::size_type length) noexcept;
+std::string GenerateShMemName();
+
+template<typename T>
+struct remove_first_type
+{};
+
+template<typename T, typename... Ts>
+struct remove_first_type<std::tuple<T, Ts...>>
+{
+    using type = std::tuple<Ts...>;
+};
 
 /**
  * Round up x to the smallest multiple of y.
@@ -125,7 +138,7 @@ void* open_map_shm(int fd, std::size_t sz);
  * x, and is a multiple of y
  */
 inline std::size_t
-div_round_up(int x, int y)
+div_round_up(int x, int y) noexcept
 {
     return y * (1 + (x - 1) / y);
 }
@@ -134,7 +147,7 @@ div_round_up(int x, int y)
  * Determines if the parent process of the current process has terminated.
  */
 inline
-bool has_parent_terminated()
+bool has_parent_terminated() noexcept
 {
     /** If our parent is the init process (PID 1), then our parent has already
      *  exited.
@@ -149,7 +162,7 @@ bool has_parent_terminated()
  */
 extern "C"
 void
-sig_livecheck_handler(int signo)
+sig_livecheck_handler(int signo) noexcept
 {
     if (has_parent_terminated())
     {
@@ -159,7 +172,7 @@ sig_livecheck_handler(int signo)
 }
 
 std::string
-GenerateRandomString(std::string::size_type length)
+GenerateRandomString(std::string::size_type length) noexcept
 {
     static auto& chrs = "0123456789"
         "abcdefghijklmnopqrstuvwxyz"
@@ -203,12 +216,12 @@ GenerateShMemName()
  * first element.
  */
 template <typename Tuple, std::size_t ... Is>
-auto pop_front_impl(const Tuple& tuple, std::index_sequence<Is...>)
+auto pop_front_impl(const Tuple& tuple, std::index_sequence<Is...>) noexcept
 {
     return std::make_tuple(std::get<1 + Is>(tuple)...);
 }
 template <typename Tuple>
-auto pop_front(const Tuple& tuple)
+auto pop_front(const Tuple& tuple) noexcept
 {
     return pop_front_impl(tuple,
                           std::make_index_sequence<std::tuple_size<Tuple>::value - 1>());
@@ -225,7 +238,7 @@ auto pop_front(const Tuple& tuple)
  * of the shared memory segment.
  */
 void*
-open_map_shm(int fd, std::size_t sz)
+open_map_shm(int fd, std::size_t sz) noexcept
 {
     int ret = ftruncate(fd, sz);
     if (ret == -1) {
@@ -266,7 +279,7 @@ open_map_shm(std::size_t sz)
  * @param  cp: PID of the child process.
  */
 bool
-has_child_terminated(pid_t cp)
+has_child_terminated(pid_t cp) noexcept
 {
     int status;
     int ret = waitpid(cp, &status, WNOHANG);
@@ -282,7 +295,7 @@ has_child_terminated(pid_t cp)
  */
 template <typename T>
 constexpr std::size_t
-CalcBufSize()
+CalcBufSize() noexcept
 {
     if constexpr (std::is_same<std::string, T>::value)
         return 8;
@@ -292,7 +305,7 @@ CalcBufSize()
 
 template <typename T, typename U, typename... Args>
 constexpr std::size_t
-CalcBufSize()
+CalcBufSize() noexcept
 {
     return CalcBufSize<T>() + CalcBufSize<U, Args...>();
 }
@@ -320,7 +333,7 @@ public:
         base_ = reinterpret_cast<std::byte*>(ptr);
     }
 
-    Channel(int fd)
+    Channel(int fd) noexcept
         : fd_{fd}
     {
         PROXY_LOG(DBG) << "Creating channel - fd: " << fd << " size: " << SZ << std::endl;
@@ -328,7 +341,7 @@ public:
         base_ = reinterpret_cast<std::byte*>(ptr);
     }
 
-    ~Channel()
+    ~Channel() noexcept
     {
         if (fd_ < 0)
             return;
@@ -349,13 +362,16 @@ public:
     Channel& operator=(Channel&& c) = delete;
 
     std::byte*
-    data()
+    data() noexcept
     {
         return base_;
     }
 
     int
-    GetFd() { return fd_; }
+    GetFd() const noexcept
+    {
+        return fd_;
+    }
 
 private:
     std::byte*    base_;
@@ -400,9 +416,16 @@ public:
      * Determines if currently its the client's turn in this channel.
      */
     __always_inline
-    bool ParentTurn() { return turn_ == kParent; }
+    bool ParentTurn() noexcept
+    {
+        return turn_ == kParent;
+    }
+
     __always_inline
-    bool ChildTurn() { return !ParentTurn(); }
+    bool ChildTurn() noexcept
+    {
+        return !ParentTurn();
+    }
 
     /**
      * Extract an element of the N-th type in the tuple type TUP from the buffer
@@ -487,15 +510,19 @@ public:
     }
 
     std::size_t
-    GetSize()
+    GetSize() noexcept
     {
         return memsz_;
     }
     
     bool
-    HangUpRequested() { return status_ == kRequestHangUp; }
+    HangUpRequested() noexcept
+    {
+        return status_ == kRequestHangUp;
+    }
 
-    ~Segment() {
+    ~Segment() noexcept
+    {
         // Inform the child (server) thread that the channel is closed.
         status_ = kRequestHangUp;
         PROXY_LOG(DBG) << "Destructing segment";
@@ -508,7 +535,7 @@ private:
      * @retval Returns true if it detects a valid Segment object, and false
      * otherwise.
      */
-    bool VerifyIntegrity() const
+    bool VerifyIntegrity() const noexcept
     {
         return magic_ == kSegmentMagic;
     }
@@ -553,7 +580,7 @@ public:
         GetSendChannel().status_ = kOpen;
     }
 
-    SegmentDescriptor(int sndfd, int rcvfd, ChannelSide side, Segment<SZ>& seg, pid_t cp)
+    SegmentDescriptor(int sndfd, int rcvfd, ChannelSide side, Segment<SZ>& seg, pid_t cp) noexcept
         : side_{side},
           segment_{seg},
           child_pid_{cp},
@@ -576,7 +603,7 @@ public:
     SegmentDescriptor& operator=(SegmentDescriptor const& sd) = delete;
     SegmentDescriptor& operator=(SegmentDescriptor&& sd) = delete;
 
-    ~SegmentDescriptor()
+    ~SegmentDescriptor() noexcept
     {
         GetSendChannel().status_ = kClosed;
         Switch();
@@ -670,12 +697,12 @@ public:
         return segment_.template ExtractParams<T>(std::data(GetRecvChannel()));
     }
 
-    Channel<SZ>& GetSendChannel()
+    Channel<SZ>& GetSendChannel() noexcept
     {
         return ((side_ == kParent) ? send_ : recv_);
     }
 
-    Channel<SZ>& GetRecvChannel()
+    Channel<SZ>& GetRecvChannel() noexcept
     {
         return ((side_ == kParent) ? recv_ : send_);
     }
@@ -715,13 +742,13 @@ public:
      * Pass the turn for this communication channel to the other side (process)
      */
     void
-    Switch()
+    Switch() noexcept
     {
         segment_.turn_ = (segment_.turn_ == kParent) ? kChild : kParent;
     }
    
     Segment<SZ>&
-    GetSegment() const
+    GetSegment() const noexcept
     {
         return segment_;
     }
@@ -731,19 +758,28 @@ public:
      * has requested it to hang up (end) this channel.
      */
     bool
-    HangUpRequested()
+    HangUpRequested() const noexcept
     {
         return segment_.HangUpRequested();
     }
 
     int
-    GetSegFd() { return fd_; }
+    GetSegFd() const noexcept
+    {
+        return fd_;
+    }
 
     int
-    GetSndFd() { return send_.GetFd(); }
+    GetSndFd() const noexcept
+    {
+        return send_.GetFd();
+    }
 
     int
-    GetRcvFd() { return recv_.GetFd(); }
+    GetRcvFd() const noexcept
+    {
+        return recv_.GetFd();
+    }
 
 private:
     ChannelSide     side_;
@@ -762,7 +798,7 @@ private:
 template<std::size_t SZ>
 class Stub {
 public:
-    Stub(SegmentDescriptor<SZ>& segd)
+    Stub(SegmentDescriptor<SZ>& segd) noexcept
         : segd_{segd}
     { }
 
@@ -789,16 +825,6 @@ public:
 
 private:
     SegmentDescriptor<SZ>& segd_;
-};
-
-template<typename T>
-struct remove_first_type
-{};
-
-template<typename T, typename... Ts>
-struct remove_first_type<std::tuple<T, Ts...>>
-{
-    using type = std::tuple<Ts...>;
 };
 
 /**
@@ -876,15 +902,19 @@ public:
         status_ = kProxyActive;
     }
 
-    ~AbstractProxy()
+    ~AbstractProxy() noexcept
     {
         using EXEMAPTYPE = std::unordered_map<void*, void*>;
-        for (auto kv : all_executions) {
-            auto v = reinterpret_cast<EXEMAPTYPE*>(kv.second);
-            auto iter = v->find(this);
-            if (iter != v->end()) {
-                v->erase(iter);
+        try {
+            for (auto kv : all_executions) {
+                auto v = reinterpret_cast<EXEMAPTYPE*>(kv.second);
+                auto iter = v->find(this);
+                if (iter != v->end()) {
+                    v->erase(iter);
+                }
             }
+        } catch (...) {
+            PROXY_LOG(ERR) << "Exception was thrown when destructing an instance of Proxy" << std::endl;
         }
     }
 
@@ -907,7 +937,7 @@ public:
      */
     template<typename RET, typename... Args>
     void
-    StartServiceLoop(SegmentDescriptor<SZ>* segd)
+    StartServiceLoop(SegmentDescriptor<SZ>* segd) noexcept
     {
         PROXY_LOG(DBG) << "Starting Service Loop." << std::endl;
         while (true) {
@@ -956,7 +986,7 @@ public:
      * of server.
      */
     void
-    ShutdownServer()
+    ShutdownServer() const
     {
         Command cmd;
         cmd.code = kShutDownRequest;
@@ -986,7 +1016,7 @@ protected:
      */
     template<typename SFUNC>
     void
-    SendNewChannelInfo(int segfd, int sndfd, int rcvfd, SFUNC service_func)
+    SendNewChannelInfo(int segfd, int sndfd, int rcvfd, SFUNC service_func) const noexcept
     {
         Command cmd;
         cmd.service_func = reinterpret_cast<void*>(service_func);
@@ -1040,7 +1070,7 @@ protected:
      * @retval Returns the newly created segment descriptor.
      */
     SegmentDescriptor<SZ>*
-    OpenChannel(ChannelSide side)
+    OpenChannel(ChannelSide side) const
     {
         /**
          * Calculate the minumum possible size for the shared memory segment.
@@ -1054,7 +1084,7 @@ protected:
     }
 
     SegmentDescriptor<SZ>*
-    OpenChannel(int segfd, int sndfd, int rcvfd, ChannelSide side)
+    OpenChannel(int segfd, int sndfd, int rcvfd, ChannelSide side) const noexcept
     {
         /**
          * Calculate the minumum possible size for the shared memory segment.
@@ -1256,7 +1286,7 @@ retry_read_command:
      * and restart the syscall if necessary.
      */
     void
-    ActivateLiveCheck()
+    ActivateLiveCheck() const noexcept
     {
         InstallLiveCheckSignalHandlers();
         StartLiveCheckSignalTimer();
@@ -1266,7 +1296,7 @@ retry_read_command:
      * Create a POSIX timer to send a SIGALRM regularly.
      */
     void
-    StartLiveCheckSignalTimer()
+    StartLiveCheckSignalTimer() const noexcept
     {
         struct itimerval val;
         val.it_value.tv_sec = 1;
@@ -1282,7 +1312,7 @@ retry_read_command:
      * 'ActivateLiveCheck()'.
      */
     void
-    InstallLiveCheckSignalHandlers()
+    InstallLiveCheckSignalHandlers() const
     {
         struct sigaction sa;
         sa.sa_handler = sig_livecheck_handler;
@@ -1305,7 +1335,7 @@ public:
     template <typename PRX, typename RET, typename... Args>
     class Execution: public AbstractExecution {
     public:
-        Execution(PRX* proxy)
+        Execution(PRX* proxy) noexcept
             : proxy_{proxy}
         {}
 
@@ -1350,7 +1380,7 @@ public:
          * Execution instance. 
          */
         void
-        Shutdown()
+        Shutdown() const
         {
             proxy_->ShutdownServer();
         }
@@ -1362,7 +1392,7 @@ public:
          * should normally be accompanied by closing those segments and
          * channels.
          */
-        ~Execution()
+        ~Execution() noexcept
         {
             delete segd_;
             delete stub_;
@@ -1406,7 +1436,7 @@ public:
     };
 
     uint64_t
-    GenerateExecutionId()
+    GenerateExecutionId() const noexcept
     {
         return rand();
     }

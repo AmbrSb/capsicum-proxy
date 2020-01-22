@@ -42,7 +42,6 @@
 
 namespace capsiproxy {
 
-
 class ParentTerminated:                         public std::exception {};
 class ChildTerminated:                          public std::exception {};
 class HangUpRequest:                            public std::exception {};
@@ -58,9 +57,11 @@ class DSOFunctionLookupFailed:                  public std::exception {};
 class InvalidProxyState:                        public std::exception {};
 class BadSegment:                               public std::exception {};
 class SharedMemoryCreationInParentFailed:       public std::exception {};
-class SharedMemoryUnlinkingInParentFailed:       public std::exception {};
-class QueryFailed:                               public std::exception {};
-
+class SharedMemoryUnlinkingInParentFailed:      public std::exception {};
+class QueryFailed:                              public std::exception {};
+class WritingToCommandSocketFailed:             public std::exception {};
+class CreatingSocketPairFailed:                 public std::exception {};
+class ForkFailed:                               public std::exception {};
 
 namespace detail {
 
@@ -963,7 +964,7 @@ public:
         int ret = write(GetCommandSocket(), &cmd, sizeof(cmd));
         if (ret == -1) {
             PROXY_LOG(ERR) << "Cannot write kShutdown request";
-            exit(EC_MAN_SOCK_WRITE_SHUTDOWN);
+            throw WritingToCommandSocketFailed{};
         }
     }
 
@@ -1217,7 +1218,7 @@ retry_read_command:
         if (ret) {
             PROXY_LOG(ERR) << "cannot create socket pair" << std::endl;
             PROXY_LOG(ERR) << "socketpair: " << strerror(errno) << std::endl;
-            exit(EC_SOCKETPAIR_CREATION);
+            throw CreatingSocketPairFailed{};
         }
     }
 
@@ -1242,7 +1243,7 @@ retry_read_command:
             child_pid_ = pid;
         } else {
             PROXY_LOG(ERR) << "fork() failed: ";
-            exit(EC_FORK_FAILED);
+            throw ForkFailed{};
         }
     }
 

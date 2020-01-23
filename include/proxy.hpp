@@ -66,6 +66,7 @@ class SharedMemoryCreationInParentFailed:       public std::exception {};
 class SharedMemoryUnlinkingInParentFailed:      public std::exception {};
 class QueryFailed:                              public std::exception {};
 class CreatingSocketPairFailed:                 public std::exception {};
+class LimitingCapabiliteisFailed:		public std::exception {};
 class WritingToCommandSocketFailed:             public std::exception {};
 class SendChannelInfoFailed:                    public std::exception {};
 class ForkFailed:                               public std::exception {};
@@ -126,6 +127,12 @@ constexpr uint32_t     kSegmentMagic = 0xc7390fbc;
 constexpr std::size_t  kSHMAlignment = 8;
 constexpr std::size_t  kPageSize     = 4098;
 
+enum MapMode {
+	CH_READ,
+	CH_WRITE,
+	CH_READ_WRITE,
+};
+
 /**
  * The utils namespace holds a bunch of utility stand-alone functions used
  * internally by the implemenation.
@@ -133,7 +140,7 @@ constexpr std::size_t  kPageSize     = 4098;
 inline namespace utils {
 inline bool has_parent_terminated() noexcept;
 std::tuple<void*, int> open_map_shm(std::size_t sz);
-void* open_map_shm(int fd, std::size_t sz) noexcept;
+void* open_map_shm(int fd, std::size_t sz, MapMode mm) noexcept;
 std::tuple<void*, int> open_map_shm(std::size_t sz);
 std::string GenerateRandomString(std::string::size_type length) noexcept;
 std::string GenerateShMemName();
@@ -172,6 +179,54 @@ bool has_parent_terminated() noexcept
      */
      return getppid() == 1;
 }
+
+#if defined(__FreeBSD__) && defined(Proxy_CapabilityMode)
+void
+limit_fd(int fd, std::initializer_list<uint64_t> rights_list)
+{
+    cap_rights_t rights;
+    cap_rights_init(&rights);
+    for (auto r : rights_list)
+	    cap_rights_set(&rights, r);
+    int ret = cap_rights_limit(fd, &rights);
+    if (ret == -1) {
+	PROXY_LOG(DBG) << "Cannot limit capabilites for fd: " << fd << std::endl;
+	throw LimitingCapabiliteisFailed{};
+    }
+}
+
+uint64_t
+limit_dso_fd(int sofd)
+{
+    uint64_t fd = fcntl(sofd, F_DUPFD);
+    limit_fd(fd, {CAP_MMAP_RX, CAP_FSTAT});
+    return fd;
+}
+
+uint64_t
+limit_seg_fd(int segfd)
+{
+    uint64_t fd = fcntl(segfd, F_DUPFD);
+    limit_fd(fd, {CAP_MMAP_RW, CAP_FTRUNCATE});
+    return fd;
+}
+
+uint64_t
+limit_send_fd(int sndfd)
+{
+    uint64_t fd = fcntl(sndfd, F_DUPFD);
+    limit_fd(fd, {CAP_MMAP_R, CAP_FTRUNCATE});
+    return fd;
+}
+
+uint64_t
+limit_recv_fd(int rcvfd)
+{
+    uint64_t fd = fcntl(rcvfd, F_DUPFD);
+    limit_fd(fd, {CAP_MMAP_W, CAP_FTRUNCATE});
+    return fd;
+}
+#endif
 
 /**
  * This is used by the child (server) process to verify that its parent
@@ -257,17 +312,30 @@ auto pop_front(const Tuple& tuple) noexcept
  * of the shared memory segment.
  */
 void*
-open_map_shm(int fd, std::size_t sz) noexcept
+open_map_shm(int fd, std::size_t sz, MapMode mm = CH_READ_WRITE) noexcept
 {
     int ret = ftruncate(fd, sz);
     if (ret == -1) {
-        PROXY_LOG(ERR) << "Cannot ftruncate shared memory for segment";
+        PROXY_LOG(ERR) << "Cannot ftruncate shared memory for segment" << std::endl;
+	perror("ftruncate");
         exit(EC_SHM_SEG_TRUNCATE);
     }
-    void* m = mmap(nullptr, sz,
-                    PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    int flags;
+    switch (mm) {
+    case CH_READ:
+	flags = PROT_READ;
+	break;
+    case CH_WRITE:
+	flags = PROT_WRITE;
+	break;
+    case CH_READ_WRITE:
+	flags = PROT_READ | PROT_WRITE;
+	break;
+    }
+    void* m = mmap(nullptr, sz, flags, MAP_SHARED, fd, 0);
     if (m == MAP_FAILED) {
-        PROXY_LOG(ERR) << "Cannot map shared memory for segment";
+        PROXY_LOG(ERR) << "Cannot map shared memory for segment" << std::endl;
+	perror("mmap");
         exit(EC_SHM_SEG_MAP);
     }
     return m;
@@ -354,12 +422,12 @@ public:
         base_ = reinterpret_cast<std::byte*>(ptr);
     }
 
-    Channel(int fd) noexcept
+    Channel(int fd, MapMode mm) noexcept
         : fd_{fd}
     {
         PROXY_LOG(DBG) << "Creating channel - fd: " << fd << " size: "
                        << SZ << std::endl;
-        auto ptr = open_map_shm(fd, SZ);
+        auto ptr = open_map_shm(fd, SZ, mm);
         base_ = reinterpret_cast<std::byte*>(ptr);
     }
 
@@ -617,8 +685,8 @@ public:
          * We do the unlinking on the child (server) side after opening the channels.
          */
           fd_{-1},
-          send_{sndfd},
-          recv_{rcvfd}
+          send_{sndfd, CH_READ},
+          recv_{rcvfd, CH_WRITE}
     {
 
         GetSendChannel().status_ = kOpen;
@@ -928,6 +996,7 @@ public:
     {
 #if defined(__FreeBSD__) && defined(Proxy_CapabilityMode)
 	sofd_ = open(soname.c_str(), O_RDONLY, S_IRUSR | S_IXUSR);
+	sofd_ = limit_dso_fd(sofd_);
 #endif
         CreateManagementSockets();
         StartServer();
@@ -1083,9 +1152,14 @@ protected:
         iov[0].iov_len = sizeof(cmd);
         MESSAGE_HEADER_COMMON_SETUP(cmd,msg,iov);
         int* p = reinterpret_cast<int*>(CMSG_DATA(cmsghdr));
-        *p       =  segfd;
-        *(p + 1) =  sndfd;
-        *(p + 2) =  rcvfd;
+#if defined(__FreeBSD__) && defined(Proxy_CapabilityMode)
+        segfd = limit_seg_fd(segfd);
+        sndfd = limit_send_fd(sndfd);
+        rcvfd = limit_recv_fd(rcvfd);
+#endif
+        *p       = segfd;
+        *(p + 1) = sndfd;
+        *(p + 2) = rcvfd;
         int ret = PXNOINT(sendmsg(GetCommandSocket(), &msg, 0));
         if (ret == -1) {
             PROXY_LOG(ERR) << "Cannot write kNewChannel request: "
@@ -1665,7 +1739,7 @@ public:
 		handle_ = dlopen(soname.c_str(), RTLD_LOCAL | RTLD_NOW);
 #endif
 		if (!handle_) {
-		    PROXY_LOG(ERR) << "Failed to open DSO!" << std::endl;
+		    PROXY_LOG(ERR) << "Failed to open DSO: " << dlerror() << std::endl;
 		    throw OpeningDSOFailed{};
 		}
 	}

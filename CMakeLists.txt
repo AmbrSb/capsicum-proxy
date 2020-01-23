@@ -49,6 +49,9 @@ add_compile_definitions(
         "$<$<CONFIG:Debug>:MALLOC_CHECK_=3;_GLIBCXX_DEBUG>"
 )
 
+set(GSL_SOURCE_DIR "${CMAKE_BINARY_DIR}/gsl-src")
+include_directories(${GSL_SOURCE_DIR}/include)
+
 include_directories(/usr/local/include include)
 link_directories(/usr/local/lib)
 

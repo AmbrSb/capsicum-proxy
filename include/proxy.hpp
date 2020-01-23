@@ -24,6 +24,8 @@
 #include <random>
 #include <iterator>
 #include <functional>
+#include <any>
+#include <gsl/pointers>
 
 #include <dlfcn.h>
 #include <immintrin.h>
@@ -34,7 +36,11 @@
 #include <string.h>
 #include <signal.h>
 
-#define PXNOINT(c) ({ int _ret; do { _ret = (c); } while (_ret == -1 && errno == EINTR); _ret; })
+#define PXNOINT(c) ({                               \
+    int _ret;                                       \
+    do { _ret = (c); }                              \
+    while (_ret == -1 && errno == EINTR); _ret;     \
+    })
 
 #define PROXY_LOG(c) PROXY_LOG_##c
 #define PROXY_LOG_ERR std::cerr
@@ -44,7 +50,6 @@
 namespace capsiproxy {
 
 class ParentTerminated:                         public std::exception {};
-class ChildTerminated:                          public std::exception {};
 class HangUpRequest:                            public std::exception {};
 class OperationFailed:                          public std::exception {};
 class ExtractionBufferOverflow:                 public std::exception {};
@@ -64,6 +69,17 @@ class CreatingSocketPairFailed:                 public std::exception {};
 class WritingToCommandSocketFailed:             public std::exception {};
 class SendChannelInfoFailed:                    public std::exception {};
 class ForkFailed:                               public std::exception {};
+class ChildTerminated:                          public std::exception {
+public:
+    ChildTerminated(int ec)
+        : exit_code_{ec} {}
+    virtual char const* what() const noexcept {
+        return (std::string{"Child exited with code: "} +
+                std::to_string(exit_code_)).c_str();
+    }
+private:
+    int exit_code_;
+};
 
 namespace detail {
 
@@ -111,8 +127,8 @@ constexpr std::size_t  kSHMAlignment = 8;
 constexpr std::size_t  kPageSize     = 4098;
 
 /**
- * The utils namespace holds a bunch of utility stand-alone functions used internally
- * by the implemenation.
+ * The utils namespace holds a bunch of utility stand-alone functions used
+ * internally by the implemenation.
  */
 inline namespace utils {
 inline bool has_parent_terminated() noexcept;
@@ -176,16 +192,16 @@ sig_livecheck_handler(int signo) noexcept
 std::string
 GenerateRandomString(std::string::size_type length) noexcept
 {
-    static auto& chrs = "0123456789"
-        "abcdefghijklmnopqrstuvwxyz"
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    thread_local static std::mt19937 rg{std::random_device{}()};
-    thread_local static std::uniform_int_distribution<std::string::size_type> pick(0, sizeof(chrs) - 2);
-    std::string s;
-    s.reserve(length);
+    std::string result;
+    static char* chars = "0123456789"
+                         "abcdefghijklmnopqrstuvwxyz"
+                         "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    static std::mt19937 randgen{std::random_device{}()};
+    static std::uniform_int_distribution<std::string::size_type>
+                         selector(0, sizeof(chars) - 2);
     while(length--)
-        s += chrs[pick(rg)];
-    return s;
+        result += chars[selector(randgen)];
+    return result;
 }
 
 std::string
@@ -226,7 +242,8 @@ template <typename Tuple>
 auto pop_front(const Tuple& tuple) noexcept
 {
     return pop_front_impl(tuple,
-                          std::make_index_sequence<std::tuple_size<Tuple>::value - 1>());
+                          std::make_index_sequence<
+                                std::tuple_size<Tuple>::value - 1>());
 }
 
 /**
@@ -280,15 +297,17 @@ open_map_shm(std::size_t sz)
  * Check if a given child process has exited for any reason.
  * @param  cp: PID of the child process.
  */
-bool
+std::tuple<bool,int>
 has_child_terminated(pid_t cp) noexcept
 {
     int status;
     int ret = PXNOINT(waitpid(cp, &status, WNOHANG));
-    if (ret > 0 && (WIFEXITED(status) || WIFSIGNALED(status) || WIFSTOPPED(status))) {
-        return true;
+    if (ret > 0 && (WIFEXITED(status)   ||
+                    WIFSIGNALED(status) ||
+                    WIFSTOPPED(status)))  {
+        return std::make_tuple(true, WEXITSTATUS(status));
     }
-    return false;
+    return std::make_tuple(false, 0);
 }
 
 /**
@@ -338,7 +357,8 @@ public:
     Channel(int fd) noexcept
         : fd_{fd}
     {
-        PROXY_LOG(DBG) << "Creating channel - fd: " << fd << " size: " << SZ << std::endl;
+        PROXY_LOG(DBG) << "Creating channel - fd: " << fd << " size: "
+                       << SZ << std::endl;
         auto ptr = open_map_shm(fd, SZ);
         base_ = reinterpret_cast<std::byte*>(ptr);
     }
@@ -441,6 +461,7 @@ public:
     void
     ExtractElem(TUP& instance, std::byte*& chan_start)
     {
+        assert(chan_start != nullptr);
         if constexpr (std::tuple_size<TUP>::value >= N + 1)
         {
             using TYPE = std::tuple_element_t<N, TUP>;
@@ -455,7 +476,8 @@ public:
                     chan_sz_ -= item_sz;
                 else
                     chan_sz_ = 0;
-                auto ret = std::align(kSHMAlignment, 1, reinterpret_cast<void*&>(chan_start), chan_sz_);
+                auto ret = std::align(kSHMAlignment, 1,
+                                      reinterpret_cast<void*&>(chan_start), chan_sz_);
                 if (ret == nullptr)
                     throw ExtractionBufferOverflow{};
             } else {
@@ -468,7 +490,8 @@ public:
                     chan_sz_ -= sizeof(item);
                 else
                     chan_sz_ = 0;
-                auto ret = std::align(kSHMAlignment, 1, reinterpret_cast<void*&>(chan_start), chan_sz_);
+                auto ret = std::align(kSHMAlignment, 1,
+                                      reinterpret_cast<void*&>(chan_start), chan_sz_);
                 if (ret == nullptr)
                     throw ExtractionBufferOverflow{};
             }
@@ -582,7 +605,8 @@ public:
         GetSendChannel().status_ = kOpen;
     }
 
-    SegmentDescriptor(int sndfd, int rcvfd, ChannelSide side, Segment<SZ>& seg, pid_t cp) noexcept
+    SegmentDescriptor(int sndfd, int rcvfd, ChannelSide side,
+                      Segment<SZ>& seg, pid_t cp) noexcept
         : side_{side},
           segment_{seg},
           child_pid_{cp},
@@ -619,7 +643,7 @@ public:
     void
     SendRequest(Args... args)
     {
-        Unroll(std::data(GetSendChannel()), SZ, args...);
+        Unroll(gsl::make_not_null(std::data(GetSendChannel())), SZ, args...);
         Switch();
     }
 
@@ -634,8 +658,10 @@ public:
      */
     template <typename T, typename... Args>
     void
-    Unroll(std::byte* base, std::size_t remaining_chan_space, T t, Args... args)
+    Unroll(gsl::not_null<std::byte*> basenn, std::size_t remaining_chan_space,
+           T t, Args... args)
     {
+        auto base = basenn.get();
         PROXY_LOG(DBG) << "Unroll: " << base << "  <-- " << t << std::endl;
         /**
          * We handle character strings differently from other types.
@@ -651,7 +677,9 @@ public:
                 remaining_chan_space = 0;
             // Move the base pointer to the next usable address with an alignment
             // of at least 8 bytes.
-            auto ret = std::align(kSHMAlignment, 1, reinterpret_cast<void*&>(base), remaining_chan_space);
+            auto ret = std::align(kSHMAlignment, 1,
+                                  reinterpret_cast<void*&>(base),
+                                  remaining_chan_space);
             // If std::align returns nullptr it means that the buffer does not have
             // enought space to hold all of the arguments.
             if (ret == nullptr)
@@ -666,7 +694,8 @@ public:
                 remaining_chan_space = 0;
             // Move the base pointer to the next usable address with an alignment
             // of at least 8 bytes.
-            auto ret = std::align(kSHMAlignment, 1, reinterpret_cast<void*&>(base), remaining_chan_space);
+            auto ret = std::align(kSHMAlignment, 1, reinterpret_cast<void*&>(base),
+                                  remaining_chan_space);
             // If std::align returns nullptr it means that the buffer does not have
             // enought space to hold all of the arguments.
             if (ret == nullptr)
@@ -674,7 +703,7 @@ public:
         }
 
         if constexpr (sizeof...(args) > 0)
-            Unroll(base, remaining_chan_space, args...);
+            Unroll(gsl::make_not_null(base), remaining_chan_space, args...);
     }
 
     /**
@@ -723,9 +752,10 @@ public:
                 _mm_pause();
                 //XXX
                 usleep(1);
-                if (has_child_terminated(child_pid_)) {
+                auto [yes, exitcode] = has_child_terminated(child_pid_);
+                if (yes) {
                     segment_.turn_ = kParent;
-                    throw ChildTerminated{};
+                    throw ChildTerminated{exitcode};
                 }
             }
         } else if (side_ == kChild) {
@@ -787,9 +817,9 @@ private:
     ChannelSide     side_;
     Segment<SZ>&    segment_;
     pid_t           child_pid_;
+    int             fd_;
     Channel<SZ>     send_;
     Channel<SZ>     recv_;
-    int             fd_;
 };
 
 /**
@@ -906,17 +936,20 @@ public:
 
     ~AbstractProxy() noexcept
     {
-        using EXEMAPTYPE = std::unordered_map<void*, void*>;
+        using EXEMAPTYPE = std::map<void*, std::any>;
         try {
             for (auto kv : all_executions) {
-                auto v = reinterpret_cast<EXEMAPTYPE*>(kv.second);
+                auto v = std::any_cast<EXEMAPTYPE*>(kv.second);
                 auto iter = v->find(this);
                 if (iter != v->end()) {
                     v->erase(iter);
                 }
             }
         } catch (...) {
-            PROXY_LOG(ERR) << "Exception was thrown when destructing an instance of Proxy" << std::endl;
+            PROXY_LOG(ERR) << "Exception was thrown when destructing "
+                              "an instance of Proxy" << std::endl;
+            // Will cause termination due to noexcept specification.
+            throw;
         }
     }
 
@@ -928,8 +961,8 @@ public:
     /**
      * This function implements the service loop for each worker thread in the
      * child (server). For each channel there is exactly one thread that runs
-     * this service loop with the types Args and RET appropriate for its corresponding
-     * fucntion.
+     * this service loop with the types Args and RET appropriate for its
+     * corresponding fucntion.
      * 
      * @tparam RET: The return type of the service function.
      * 
@@ -1055,7 +1088,8 @@ protected:
         *(p + 2) =  rcvfd;
         int ret = PXNOINT(sendmsg(GetCommandSocket(), &msg, 0));
         if (ret == -1) {
-            PROXY_LOG(ERR) << "Cannot write kNewChannel request: " << errno << std::endl;
+            PROXY_LOG(ERR) << "Cannot write kNewChannel request: "
+                           << errno << std::endl;
             throw SendChannelInfoFailed{};
         }
     }
@@ -1175,7 +1209,8 @@ protected:
     void
     SendCommand(Command const& cmd) const
     {
-        int ret = PXNOINT(write(GetCommandSocket(), reinterpret_cast<void const*>(&cmd), sizeof(cmd)));
+        int ret = PXNOINT(write(GetCommandSocket(), reinterpret_cast<void const*>(&cmd),
+                                sizeof(cmd)));
         if (ret == -1) {
                 PROXY_LOG(INF) << "Client: Writing to command socket failed." << std::endl;
                 throw ParentWrite2CommandSocketFailed{};
@@ -1422,15 +1457,16 @@ public:
     ExecuteInternal(Selector sel, Args... args)
     {
         using EXETYPE = Execution<AbstractProxy<SUB, SZ>, RET, Args...>;
-        using EXEMAPTYPE = std::unordered_map<void*, void*>;
+        using EXEMAPTYPE = std::map<void*, std::any>;
         static bool first_run = true;
         static uint64_t unique_id = GenerateExecutionId();
         if (first_run) {
             first_run = false;
             static EXEMAPTYPE* executions = new EXEMAPTYPE{};
-            all_executions.insert({unique_id, static_cast<void*>(executions)});
+            all_executions.insert({unique_id, executions});
         }
-        auto executions = reinterpret_cast<EXEMAPTYPE*>(std::get<1>(*(all_executions.find(unique_id))));
+        auto executions = std::any_cast<EXEMAPTYPE*>(
+                                    std::get<1>(*(all_executions.find(unique_id))));
         EXETYPE* execution = nullptr;
         auto iter = executions->find(this);
         if (iter == executions->end()) {
@@ -1440,7 +1476,7 @@ public:
             } else
                 throw TriedToStopNonExistentSegmentDescriptor{};
         } else {
-            execution = reinterpret_cast<EXETYPE*>(std::get<1>(*iter));
+            execution = std::any_cast<EXETYPE*>(std::get<1>(*iter));
             if (sel == kStop) {
                 PROXY_LOG(DBG) << "Parent: Got kStop command for Execution instance";
                 executions->erase(iter);
@@ -1451,7 +1487,7 @@ public:
                 PROXY_LOG(DBG) << "Parent: Got kShutDown command for Execution instance";
                 executions->erase(iter);
                 for (auto& e : *executions)
-                    delete reinterpret_cast<EXETYPE*>(std::get<1>(e));
+                    delete std::any_cast<EXETYPE*>(std::get<1>(e));
                 executions->clear();
                 execution->Shutdown();
                 delete execution;
@@ -1571,7 +1607,7 @@ private:
      * handling the requests on that segment.
      */
     std::unordered_map<SegmentDescriptor<SZ>*, std::thread*> threads_;
-    inline static std::unordered_map<uint64_t, void*> all_executions{};
+    inline static std::unordered_map<uint64_t, std::any> all_executions{};
 };
 
 } // End of namespace 'detail'
@@ -1659,16 +1695,18 @@ public:
         auto func_iter = funcs_.find(func_name);
         if (func_iter == funcs_.end()) {
             /* Function is not in cache (i.e not already looked up). */
-            PROXY_LOG(DBG) << "DSO function cache miss: (" << func_name.c_str() << ")" << std::endl;
+            PROXY_LOG(DBG) << "DSO function cache miss: ("
+                           << func_name.c_str() << ")" << std::endl;
             func_ptr = (func_type)dlsym(handle_, func_name.c_str());
-            funcs_[func_name] = (void*)func_ptr;
+            funcs_[func_name] = reinterpret_cast<void*>(func_ptr);
             if (!func_ptr) {
                 PROXY_LOG(ERR) << "Failed to lookup function in DSO" << std::endl;
                 PROXY_LOG(ERR) << "dlerror: " << dlerror() << std::endl;
                 throw DSOFunctionLookupFailed{};
             }
         } else {
-            PROXY_LOG(DBG) << "DSO function cache hit: (" << func_name.c_str() << ")" << std::endl;
+            PROXY_LOG(DBG) << "DSO function cache hit: ("
+                           << func_name.c_str() << ")" << std::endl;
             func_ptr = reinterpret_cast<func_type>(std::get<1>(*(func_iter)));
         }
         /**
@@ -1705,8 +1743,8 @@ private:
  * will be used, since its login is supplied via a DSO.
  * 
  * One reason I use the factory pattern here is that I want to block the
- * child. Had I used the constructors of these classes directly, I would
- * have had to block the child in its constructor, which may be problematic.
+ * child. Had I used the constructors of these classes directly, I would have
+ * had to block the child in its constructor, which may be problematic.
  */
 template<std::size_t SZ = 4096,
          typename SERV = std::void_t<void>>

@@ -68,7 +68,8 @@
         "typeindex": "cpp",
         "variant": "cpp",
         "pointers": "cpp",
-        "gsl_transition": "cpp"
+        "gsl_transition": "cpp",
+        "any": "cpp"
     },
     "cSpell.enabledLanguageIds": [
         "asciidoc",

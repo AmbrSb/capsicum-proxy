@@ -45,6 +45,7 @@
 #define PROXY_LOG(c) PROXY_LOG_##c
 #define PROXY_LOG_ERR std::cerr
 #define PROXY_LOG_DBG std::cerr
+// #define PROXY_LOG_DBG null_stream
 #define PROXY_LOG_INF std::cerr
 
 namespace capsiproxy {
@@ -96,6 +97,7 @@ enum ExitCodes {
     EC_SOCKETPAIR_CREATION              = 80,
     EC_FORK_FAILED                      = 90,
     EC_ChildLoopFinishedWithError       = 100,
+    EC_Opening_DSO_Failed               = 110,
 };
 
 class NullBuffer : public std::streambuf
@@ -534,21 +536,25 @@ public:
         {
             using TYPE = std::tuple_element_t<N, TUP>;
             if constexpr (std::is_same<TYPE, std::string>::value) {
+                auto ret = std::align(kSHMAlignment, 1,
+                                      reinterpret_cast<void*&>(chan_start), chan_sz_);
+                if (ret == nullptr)
+                    throw ExtractionBufferOverflow{};
                 char* item = reinterpret_cast<char*>(chan_start);
                 PROXY_LOG(DBG) << "Extracted string value: " << item << std::endl;
                 std::string item_str {item};
                 std::string::size_type item_sz = item_str.size();
                 std::get<N>(instance) = item_str;
-                chan_start += item_sz;
+                chan_start += (item_sz + 1);
                 if (item_sz <= chan_sz_)
-                    chan_sz_ -= item_sz;
+                    chan_sz_ -= (item_sz + 1);
                 else
                     chan_sz_ = 0;
+            } else {
                 auto ret = std::align(kSHMAlignment, 1,
                                       reinterpret_cast<void*&>(chan_start), chan_sz_);
                 if (ret == nullptr)
                     throw ExtractionBufferOverflow{};
-            } else {
                 std::add_pointer_t<TYPE> p0;
                 auto item = reinterpret_cast<decltype(p0)>(chan_start);
                 PROXY_LOG(DBG) << "Extracted non-string value: " << *item << std::endl;
@@ -558,10 +564,6 @@ public:
                     chan_sz_ -= sizeof(item);
                 else
                     chan_sz_ = 0;
-                auto ret = std::align(kSHMAlignment, 1,
-                                      reinterpret_cast<void*&>(chan_start), chan_sz_);
-                if (ret == nullptr)
-                    throw ExtractionBufferOverflow{};
             }
         }
     }
@@ -581,7 +583,7 @@ public:
     {
         PROXY_LOG(DBG) << "ExtractParams: " << buf << std::endl;
         T tup;
-        static_assert(std::tuple_size<T>::value <= 17);
+        static_assert(std::tuple_size<T>::value < 17);
         chan_sz_ = SZ;
         ExtractElem<0> (tup, buf);
         ExtractElem<1> (tup, buf);
@@ -711,7 +713,8 @@ public:
     void
     SendRequest(Args... args)
     {
-        Unroll(gsl::make_not_null(std::data(GetSendChannel())), SZ, args...);
+        if constexpr (sizeof...(Args) > 0)
+            Unroll(gsl::make_not_null(std::data(GetSendChannel())), SZ, args...);
         Switch();
     }
 
@@ -735,24 +738,32 @@ public:
          * We handle character strings differently from other types.
          */
         if constexpr (std::is_same<T, std::string>::value) {
-            char* base_param = reinterpret_cast<char*>(base);
-            strcpy(base_param, t.c_str());
-            std::string::size_type strlen = t.size();
-            base += strlen;
-            if (strlen <= remaining_chan_space)
-                remaining_chan_space -= strlen;
-            else
-                remaining_chan_space = 0;
             // Move the base pointer to the next usable address with an alignment
             // of at least 8 bytes.
-            auto ret = std::align(kSHMAlignment, 1,
+            auto ret = std::align(kSHMAlignment, t.size() + 1,
                                   reinterpret_cast<void*&>(base),
                                   remaining_chan_space);
             // If std::align returns nullptr it means that the buffer does not have
             // enought space to hold all of the arguments.
             if (ret == nullptr)
                 throw SendBufferOverflow{};
+            char* base_param = reinterpret_cast<char*>(base);
+            strcpy(base_param, t.c_str());
+            std::string::size_type strlen = t.size();
+            base += (strlen + 1);
+            if (strlen <= remaining_chan_space)
+                remaining_chan_space -= strlen;
+            else
+                remaining_chan_space = 0;
         } else {
+            // Move the base pointer to the next usable address with an alignment
+            // of at least 8 bytes.
+            auto ret = std::align(kSHMAlignment, 8, reinterpret_cast<void*&>(base),
+                                  remaining_chan_space);
+            // If std::align returns nullptr it means that the buffer does not have
+            // enought space to hold all of the arguments.
+            if (ret == nullptr)
+                throw SendBufferOverflow{};
             T* base_param = reinterpret_cast<T*>(base);
             *base_param = t;
             base += sizeof(T);
@@ -760,14 +771,6 @@ public:
                 remaining_chan_space -= sizeof(T);
             else
                 remaining_chan_space = 0;
-            // Move the base pointer to the next usable address with an alignment
-            // of at least 8 bytes.
-            auto ret = std::align(kSHMAlignment, 1, reinterpret_cast<void*&>(base),
-                                  remaining_chan_space);
-            // If std::align returns nullptr it means that the buffer does not have
-            // enought space to hold all of the arguments.
-            if (ret == nullptr)
-                throw SendBufferOverflow{};
         }
 
         if constexpr (sizeof...(args) > 0)
@@ -788,7 +791,7 @@ public:
                        << " is waiting for its turn" << std::endl;
         Wait();
         if (side_ == kChild && segment_.HangUpRequested()) {
-            PROXY_LOG(DBG) << "Child: Got HangUp request1" << std::endl;
+            PROXY_LOG(DBG) << "Child: Got HangUp request [1]" << std::endl;
             throw HangUpRequest{};
         }
         PROXY_LOG(DBG) << ((side_ == kParent) ? "Parent" : "Child")
@@ -823,6 +826,7 @@ public:
                 auto [yes, exitcode] = has_child_terminated(child_pid_);
                 if (yes) {
                     segment_.turn_ = kParent;
+                    PROXY_LOG(DBG) << "Child Terminated with exit code: " << exitcode << std::endl;
                     throw ChildTerminated{exitcode};
                 }
             }
@@ -1052,10 +1056,10 @@ public:
                 // Send the result back to the parent process.
                 segd->SendRequest(result);
             } catch (ParentTerminated& pte) {
-                PROXY_LOG(INF) << "Child: Parent terminated" << std::endl;
+                PROXY_LOG(DBG) << "Child: Parent terminated" << std::endl;
                 exit(EC_OK);
             } catch (HangUpRequest&) {
-                PROXY_LOG(INF) << "Child: Got hangup request2" << std::endl;
+                PROXY_LOG(DBG) << "Child: Got hangup request [2]" << std::endl;
                 /**
                  * Free the segment and channel resources and return from this
                  * function to terminate this service this.
@@ -1598,7 +1602,8 @@ public:
          * Compile-time check to ensure that the selected buffer size SZ is
          * sufficient for the provided argument and return types.
          */
-        static_assert(CalcBufSize<Args...>() <= SZ  , "SZ is too small for Args");
+        if constexpr (sizeof...(Args) > 0)
+            static_assert(CalcBufSize<Args...>() <= SZ  , "SZ is too small for Args");
         static_assert(CalcBufSize<RET>() <= SZ      , "SZ is too small for RET");
 
         if (status_ != kProxyActive)
@@ -1732,19 +1737,19 @@ public:
     {
         using namespace detail;
         PROXY_LOG(DBG) << "Going to dlopen '" << soname << "'" << std::endl;
-	if (this->side_ == kChild) {
+        if (this->side_ == kChild) {
 #if defined(__FreeBSD__) && defined(Proxy_CapabilityMode)
-		handle_ = fdlopen(this->sofd_, RTLD_LOCAL | RTLD_NOW);
+            handle_ = fdlopen(this->sofd_, RTLD_LOCAL | RTLD_NOW);
 #else
-		handle_ = dlopen(soname.c_str(), RTLD_LOCAL | RTLD_NOW);
+            handle_ = dlopen(soname.c_str(), RTLD_LOCAL | RTLD_NOW);
 #endif
-		if (!handle_) {
-		    PROXY_LOG(ERR) << "Failed to open DSO: " << dlerror() << std::endl;
-		    throw OpeningDSOFailed{};
-		}
-	}
+            if (!handle_) {
+                PROXY_LOG(ERR) << "---------------- Failed to open DSO: " << dlerror() << std::endl;
+                exit(EC_Opening_DSO_Failed);
+            }
+        }
 #if defined(__FreeBSD__) && defined(Proxy_CapabilityMode)
-	PXNOINT(close(this->sofd_));
+        PXNOINT(close(this->sofd_));
 #endif
     }
 
@@ -1796,7 +1801,7 @@ private:
     /**
      * The handle to the DSO opened via the DLOpen API.
      */
-    void* handle_;
+    void* handle_ = nullptr;
     /**
      * A cache of the handles to the functions looked up in the DSO.
      */

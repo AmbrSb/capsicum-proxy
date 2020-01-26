@@ -9,15 +9,6 @@
 #include <gtest/gtest.h>
 #include <proxy.hpp>
 
-
-using ::testing::EmptyTestEventListener;
-using ::testing::InitGoogleTest;
-using ::testing::Test;
-using ::testing::TestEventListeners;
-using ::testing::TestInfo;
-using ::testing::TestPartResult;
-using ::testing::UnitTest;
-
 namespace {
 
 using namespace std::literals;
@@ -219,6 +210,11 @@ TEST(ProxyDLOAPITest, NonExistantDso) {
     EXPECT_THROW(p.Execute<int>("add"s, 20, 30),
                  capsiproxy::ChildTerminated);
 
+}
+
+TEST(ProxyDLOAPITest, NonExistantFunctionInDSO) {
+    auto p = Proxy<4096>::Build("./libtest.so");
+    EXPECT_ANY_THROW(p.Execute<int>("unknown_func"s, 20, 30));
 }
 
 }

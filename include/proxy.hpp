@@ -40,7 +40,8 @@
 #define PXNOINT(c) ({                               \
     int _ret;                                       \
     do { _ret = (c); }                              \
-    while (_ret == -1 && errno == EINTR); _ret;     \
+    while (_ret == -1 && errno == EINTR);           \
+    _ret;                                           \
     })
 
 #define PROXY_LOG(c) PROXY_LOG_##c
@@ -186,6 +187,13 @@ bool has_parent_terminated() noexcept
 }
 
 #if defined(__FreeBSD__) && defined(Proxy_CapabilityMode)
+/**
+ * Limit the 'fd' file descriptor so that it can only be used as dicated by
+ * the rights in 'rights_list'.
+ * 
+ * @param  fd: The file descriptor to be limited
+ * @param  rights_list: A list of requested rights
+ */
 void
 limit_fd(int fd, std::initializer_list<uint64_t> rights_list)
 {
@@ -200,33 +208,78 @@ limit_fd(int fd, std::initializer_list<uint64_t> rights_list)
     }
 }
 
+/**
+ * Limit the `sofd` file descriptor to the dynamic shared object that is to be
+ * passed to the sandbox process, so that it can only be mapped with READ_EXECUTE
+ * permission and can also be fstat()ed. This prevents the sandboxed process
+ * from making any changes to the file.
+ * 
+ * @retval The new file descriptor (capability) to be pass to the server.
+ */
 uint64_t
 limit_dso_fd(int sofd)
 {
+    /**
+     * We should duplicated the file descriptor, otherwise the limitations will
+     * also apply to the parent (client) process.
+     */    
     uint64_t fd = fcntl(sofd, F_DUPFD);
     limit_fd(fd, {CAP_MMAP_RX, CAP_FSTAT});
     return fd;
 }
 
+/**
+ * Limit the `segfd` file descriptor to the shared memory object we want to
+ * pass to the sandbox process, so that it can only be mapped with READ_WRITE
+ * permission.
+ * 
+ * @retval The new file descriptor (capability) to be pass to the server.
+ */
 uint64_t
 limit_seg_fd(int segfd)
 {
+    /**
+     * We should duplicated the file descriptor, otherwise the limitations will
+     * also apply to the parent (client) process.
+     */    
     uint64_t fd = fcntl(segfd, F_DUPFD);
     limit_fd(fd, {CAP_MMAP_RW, CAP_FTRUNCATE});
     return fd;
 }
 
+/**
+ * Limit the `sndvfd` file descriptor to the shared memory object we want to
+ * pass to the sandbox process, so that it can only be mapped with READ_ONLY
+ * permission.
+ * 
+ * @retval The new file descriptor (capability) to be pass to the server.
+ */
 uint64_t
 limit_send_fd(int sndfd)
 {
+    /**
+     * We should duplicated the file descriptor, otherwise the limitations will
+     * also apply to the parent (client) process.
+     */    
     uint64_t fd = fcntl(sndfd, F_DUPFD);
     limit_fd(fd, {CAP_MMAP_R, CAP_FTRUNCATE});
     return fd;
 }
 
+/**
+ * Limit the `recvfd` file descriptor to the shared memory object we want to
+ * pass to the sandbox process, so that it can only be mapped with WRITE_ONLY
+ * permission.
+ * 
+ * @retval The new file descriptor (capability) to be pass to the server.
+ */
 uint64_t
 limit_recv_fd(int rcvfd)
 {
+    /**
+     * We should duplicated the file descriptor, otherwise the limitations will
+     * also apply to the parent (client) process.
+     */    
     uint64_t fd = fcntl(rcvfd, F_DUPFD);
     limit_fd(fd, {CAP_MMAP_W, CAP_FTRUNCATE});
     return fd;
@@ -331,10 +384,9 @@ auto pop_front(const Tuple& tuple) noexcept
 /**
  * Auxiliary function to open a shared memory segment and map it into the address
  * space of the current process.
- * @param  name: The name of the named shared memory.
+ * @param  fd: A file descriptor (capbaility) to a shared memory segment.
  * @param  sz: The size of the shared memory segment.
- * @param  auto_unlink: If true, this function unlinks the named shared memory
- * after mapping it.
+ * @param  mm: The mode (read/write) in which the memory should be mapped.
  * @retval Upon success this function returns a void* pointer to the beginning
  * of the shared memory segment.
  */
@@ -368,6 +420,15 @@ open_map_shm(int fd, std::size_t sz, MapMode mm = CH_READ_WRITE) noexcept
     return m;
 }
 
+/**
+ * Auxiliary function to open a shared memory segment and map it into the address
+ * space of the current process. A unique random string is used to create the
+ * POSIX named shared memory segment.
+ * @param  sz: The size of the shared memory segment.
+ * @retval Upon success this function returns a void* pointer to the beginning
+ * of the shared memory segment, and a file descriptor to the shared memory
+ * segment.
+ */
 std::tuple<void*, int>
 open_map_shm(std::size_t sz)
 {
@@ -379,6 +440,11 @@ open_map_shm(std::size_t sz)
         throw SharedMemoryCreationInParentFailed{};
     }
     auto ptr = open_map_shm(fd, sz);
+    /**
+     * We no longer need the this named shared memory in /dev/shm. So we just
+     * unlink it immediately. The server process will open this shared memory
+     * via the file descriptor we send to it.
+     */
     int ret = shm_unlink(name.c_str());
     if (ret) {
         PROXY_LOG(ERR) << "Cannot unlink the shared memory of segment";
@@ -392,17 +458,18 @@ open_map_shm(std::size_t sz)
  * Check if a given child process has exited for any reason.
  * @param  cp: PID of the child process.
  */
-std::tuple<bool,int>
+std::tuple<bool,int,rusage>
 has_child_terminated(pid_t cp) noexcept
 {
     int status;
-    int ret = PXNOINT(waitpid(cp, &status, WNOHANG));
+    rusage ru;
+    int ret = PXNOINT(wait4(cp, &status, WNOHANG, &ru));
     if (ret > 0 && (WIFEXITED(status)   ||
                     WIFSIGNALED(status) ||
                     WIFSTOPPED(status)))  {
-        return std::make_tuple(true, WEXITSTATUS(status));
+        return std::make_tuple(true, WEXITSTATUS(status), ru);
     }
-    return std::make_tuple(false, 0);
+    return std::make_tuple(false, 0, ru);
 }
 
 /**
@@ -557,33 +624,63 @@ public:
     ExtractElem(TUP& instance, std::byte*& chan_start)
     {
         assert(chan_start != nullptr);
+        /**
+         * Generate the body of method only if there are enought many
+         * elements in the ruple.
+         */
         if constexpr (std::tuple_size<TUP>::value >= N + 1)
         {
             using TYPE = std::tuple_element_t<N, TUP>;
+            /**
+             * Since strings can have arbitrary length, they need special
+             * treatment. The string must be null-terminated.
+             */
             if constexpr (std::is_same<TYPE, std::string>::value) {
                 auto ret = std::align(kSHMAlignment, 1,
-                                      reinterpret_cast<void*&>(chan_start), chan_sz_);
+                                      reinterpret_cast<void*&>(chan_start),
+                                      chan_sz_);
                 if (ret == nullptr)
                     throw ExtractionBufferOverflow{};
                 char* item = reinterpret_cast<char*>(chan_start);
-                PROXY_LOG(DBG) << "Extracted string value: " << item << std::endl;
+                PROXY_LOG(DBG) << "Extracted string value: " << item
+                               << std::endl;
                 std::string item_str {item};
                 std::string::size_type item_sz = item_str.size();
+                /**
+                 * Put the extracted string into the results tuple.
+                 */
                 std::get<N>(instance) = item_str;
+                /**
+                 * Update chan_start and chan_sz_ to pass the extracted value.
+                 * The starting address for the next value will be calculated
+                 * using std::align in the next iteration/call.
+                 */
                 chan_start += (item_sz + 1);
                 if (item_sz <= chan_sz_)
                     chan_sz_ -= (item_sz + 1);
                 else
                     chan_sz_ = 0;
-            } else {
+
+            } else { // Any thing other than a std::string
+
                 auto ret = std::align(kSHMAlignment, 1,
-                                      reinterpret_cast<void*&>(chan_start), chan_sz_);
+                                      reinterpret_cast<void*&>(chan_start),
+                                      chan_sz_);
                 if (ret == nullptr)
                     throw ExtractionBufferOverflow{};
                 std::add_pointer_t<TYPE> p0;
                 auto item = reinterpret_cast<decltype(p0)>(chan_start);
-                PROXY_LOG(DBG) << "Extracted non-string value: " << *item << std::endl;
+                PROXY_LOG(DBG) << "Extracted non-string value: " << *item
+                               << std::endl;
+                /**
+                 * Put the extracted string into the results tuple.
+                 */
                 std::get<N>(instance) = *item;
+                /**
+                 * Update chan_start and chan_sz_ to pass the extracted value.
+                 * The starting address for the next value will be calculated
+                 * using std::align in the next iteration/call.
+                 */
                 chan_start += sizeof(item);
                 if (sizeof(item) <= chan_sz_)
                     chan_sz_ -= sizeof(item);
@@ -594,8 +691,8 @@ public:
     }
 
     /**
-     * Extract parameters with types as types of tuple T. This method assumes that
-     * tuple T has at most 16 elements.
+     * Extract parameters with types as types of tuple T. This method assumes
+     * that tuple T has at most 16 elements.
      * 
      * @param  buf: The memory segment in which the raw data is layed out.
      * 
@@ -747,7 +844,7 @@ public:
      * Lay out a series of values of type Args... in a memory segment with
      * appropriate alignment. This method is called recursively.
      * 
-     * @param  base: The starting address of the memory segment.
+     * @param  basenn: The starting address of the memory segment.
      * @param  remaining_chan_space: size of available memory left in the segment
      * @param  t: The first value in the series of type T
      * @param  args: The reset of the values of types Args...
@@ -763,34 +860,40 @@ public:
          * We handle character strings differently from other types.
          */
         if constexpr (std::is_same<T, std::string>::value) {
-            // Move the base pointer to the next usable address with an alignment
-            // of at least 8 bytes.
+            /*
+             * Move the base pointer to the next usable address with an alignment
+             * of at least 8 bytes.
+             */
             auto ret = std::align(kSHMAlignment, t.size() + 1,
                                   reinterpret_cast<void*&>(base),
                                   remaining_chan_space);
-            // If std::align returns nullptr it means that the buffer does not have
-            // enought space to hold all of the arguments.
             if (ret == nullptr)
                 throw SendBufferOverflow{};
             char* base_param = reinterpret_cast<char*>(base);
             strcpy(base_param, t.c_str());
             std::string::size_type strlen = t.size();
+            /**
+             * Update base and remaining_chan_space for next iteration.
+             */
             base += (strlen + 1);
             if (strlen <= remaining_chan_space)
                 remaining_chan_space -= strlen;
             else
                 remaining_chan_space = 0;
         } else {
-            // Move the base pointer to the next usable address with an alignment
-            // of at least 8 bytes.
+            /*
+             * Move the base pointer to the next usable address with an alignment
+             * of at least 8 bytes.
+             */
             auto ret = std::align(kSHMAlignment, 8, reinterpret_cast<void*&>(base),
                                   remaining_chan_space);
-            // If std::align returns nullptr it means that the buffer does not have
-            // enought space to hold all of the arguments.
             if (ret == nullptr)
                 throw SendBufferOverflow{};
             T* base_param = reinterpret_cast<T*>(base);
             *base_param = t;
+            /**
+             * Update base and remaining_chan_space for next iteration.
+             */
             base += sizeof(T);
             if (sizeof(T) <= remaining_chan_space)
                 remaining_chan_space -= sizeof(T);
@@ -872,7 +975,7 @@ public:
     {
         segment_.turn_ = (segment_.turn_ == kParent) ? kChild : kParent;
     }
-   
+
     Segment<SZ>&
     GetSegment() const noexcept
     {
@@ -1021,7 +1124,11 @@ public:
     AbstractProxy(std::string soname)
     {
 #if defined(__FreeBSD__) && defined(Proxy_CapabilityMode)
-	sofd_ = open(soname.c_str(), O_RDONLY, S_IRUSR | S_IXUSR);
+	/**
+     * In case of FreeBSD and capsicum, we will use fdlopen() instead of
+     * dlopen(). So just get a file desctriptor to the DSO and limit it.
+	 */
+	sofd_ = open(soname.c_str(), O_RDONLY, 0);
 	sofd_ = limit_dso_fd(sofd_);
 #endif
         CreateManagementSockets();
@@ -1766,7 +1873,7 @@ public:
             handle_ = dlopen(soname.c_str(), RTLD_LOCAL | RTLD_NOW);
 #endif
             if (!handle_) {
-                PROXY_LOG(ERR) << "---------------- Failed to open DSO: " << dlerror() << std::endl;
+                PROXY_LOG(ERR) << "Failed to open DSO: " << dlerror() << std::endl;
                 exit(EC_Opening_DSO_Failed);
             }
         }

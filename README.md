@@ -6,9 +6,10 @@ All similar requests can be run in a single sandbox to avoid the overhead of pro
 # Example
 ## Sandboxing a DSO
 Assume we have a library libtest.so that has a function named 'add' that takes two integers and returns the sum. You can sandbox the DSO as easily as:
+```C++
     auto p = Proxy<4096>::Build("./libtest.so");
     auto result = p.Execute<int>("add"s, 20, 30);
-
+```
 ## Sandboxing part of the source code
 You should create a class that has a method named 'Handle' with appropriate signature.
 ```c++

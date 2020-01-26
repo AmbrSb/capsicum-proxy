@@ -10,6 +10,7 @@
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+#include <sys/resource.h>
 
 #include <atomic>
 #include <cstdint>
@@ -73,14 +74,16 @@ class SendChannelInfoFailed:                    public std::exception {};
 class ForkFailed:                               public std::exception {};
 class ChildTerminated:                          public std::exception {
 public:
-    ChildTerminated(int ec)
-        : exit_code_{ec} {}
+    ChildTerminated(int ec, rusage ru)
+        : exit_code_{ec},
+          ru_{ru} {}
     virtual char const* what() const noexcept {
         return (std::string{"Child exited with code: "} +
                 std::to_string(exit_code_)).c_str();
     }
 private:
     int exit_code_;
+    rusage ru_;
 };
 
 namespace detail {
@@ -229,6 +232,28 @@ limit_recv_fd(int rcvfd)
     return fd;
 }
 #endif
+
+/**
+ * Just an ad-hoc method to have a short period of busy waiting followed by
+ * sleeping to minimize CPU usage while remaining agile for fast back-to-back
+ * requests.
+ * @param  reset: Reset the method back to busy waiting.
+ */
+__always_inline
+void adaptive_wait(bool reset = false)
+{
+    //XXX: chose some system dependent value for kThreshold
+    constexpr uint64_t kThreshhold = 2000'000;
+    static uint64_t cnt = 0;
+    if (reset)
+        cnt = 0;
+    if (cnt <= kThreshhold) {
+        cnt++;
+        _mm_pause();
+    }
+    else
+        usleep(10000);
+}
 
 /**
  * This is used by the child (server) process to verify that its parent
@@ -818,23 +843,20 @@ public:
     void
     Wait()
     {
+        adaptive_wait(true);
         if (side_ == kParent) {
             while(segment_.turn_ == kChild) {
-                _mm_pause();
-                //XXX
-                usleep(1);
-                auto [yes, exitcode] = has_child_terminated(child_pid_);
+                adaptive_wait(false);
+                auto [yes, exitcode, usage] = has_child_terminated(child_pid_);
                 if (yes) {
                     segment_.turn_ = kParent;
                     PROXY_LOG(DBG) << "Child Terminated with exit code: " << exitcode << std::endl;
-                    throw ChildTerminated{exitcode};
+                    throw ChildTerminated{exitcode, usage};
                 }
             }
         } else if (side_ == kChild) {
             while(segment_.turn_ == kParent) {
-                _mm_pause();
-                //XXX
-                usleep(1);
+                adaptive_wait(false);
                 if (has_parent_terminated()) {
                     throw ParentTerminated{};
                 }

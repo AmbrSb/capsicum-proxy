@@ -1,1 +1,0 @@
-/usr/bin/c++  -g   CMakeFiles/sandbox_clone.dir/tests/libtest.cpp.o CMakeFiles/sandbox_clone.dir/tests/tests.cpp.o  -o sandbox_clone 

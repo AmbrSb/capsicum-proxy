@@ -1,1 +1,0 @@
-/usr/bin/c++  -g   CMakeFiles/_test.dir/tests/tests.cpp.o  -o _test  -L/usr/local/lib 

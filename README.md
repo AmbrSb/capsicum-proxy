@@ -1,5 +1,5 @@
 # CapsyProxy
-Using this single-header library you can easily run untrusted code or function from untrusted dynamic shared object, inside a capsicum based sandbox with minimum privileges in a separate process.
+Using this single-header library you can easily run any untrusted piece of code, or a function in an untrusted dynamic shared object, inside a capsicum-based sandbox, in a separate process with minimum privileges.
 All fast-path communication between the client code and the sandbox are done via shared memory segments to minimize latency and avoid system call and context switching overhead.
 All similar requests can be run in a single sandbox to avoid the overhead of process creation and setup.
 
@@ -29,7 +29,7 @@ Then sandbox it as this:
     auto p = Proxy<4096, Service>::Build();
     auto result = p.Execute<std::string>("echo request"s);
 ```
-See the test.cpp file for more example.
+See `test.cpp` for more examples.
 
 The sandbox will keep running waiting for more requests from the client code. You can explicitly ask it to stop:
 ```C++

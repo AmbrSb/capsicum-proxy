@@ -1,3 +1,0 @@
-repository='https://github.com/microsoft/GSL'
-module=''
-tag=''

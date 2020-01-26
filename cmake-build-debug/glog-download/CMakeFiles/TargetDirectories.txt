@@ -1,3 +1,0 @@
-/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/glog-download/CMakeFiles/rebuild_cache.dir
-/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/glog-download/CMakeFiles/glog.dir
-/home/max/WS/Projects/fbsd-sandboxing/sandbox-clone/cmake-build-debug/glog-download/CMakeFiles/edit_cache.dir

@@ -1,5 +1,0 @@
-<map id="BaseProxy" name="BaseProxy">
-<area shape="rect" id="node2" href="$classAbstractProxy.html" title="{AbstractProxy\&lt; REQ,\l SZ \&gt;\n|# segd_\l# stub_\l# handle_\l# chan_sz_\l# side_\l|+ Execute()\l# AbstractProxy()\l# Init()\l# Do()\l# InstallSignalHandlers()\l# StartServiceLoop()\l# StartServiceLoopForChild()\l# ExtractElem()\l# ExtractParams()\l# PutResult()\l}" alt="" coords="96,131,287,413"/>
-<area shape="rect" id="node3" href="$classProxyDirect.html" title="{ProxyDirect\&lt; REQ, SZ \&gt;\n|+ service_\l|+ ProxyDirect()\l}" alt="" coords="5,491,175,568"/>
-<area shape="rect" id="node4" href="$classProxySO.html" title="{ProxySO\&lt; REQ, SZ \&gt;\n|&#45; handle_\l|+ ProxySO()\l+ if()\l+ StartServiceLoopForChild()\l+ ~ProxySO()\l&#45; Do()\l}" alt="" coords="199,461,389,597"/>
-</map>

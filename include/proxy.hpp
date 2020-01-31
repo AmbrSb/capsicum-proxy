@@ -1059,7 +1059,7 @@ private:
 template<std::size_t SZ>
 class Stub {
 public:
-    Stub(SegmentDescriptor<SZ>& segd) noexcept
+    explicit Stub(SegmentDescriptor<SZ>& segd) noexcept
         : segd_{segd}
     { }
 
@@ -1153,7 +1153,7 @@ public:
         status_ = kProxyActive;
     }
 
-    AbstractProxy(std::string soname)
+    explicit AbstractProxy(std::string soname)
     {
 #if defined(__FreeBSD__) && defined(Proxy_CapabilityMode)
 	/**
@@ -1585,7 +1585,7 @@ public:
     template <typename PRX, typename RET, typename... Args>
     class Execution: public AbstractExecution {
     public:
-        Execution(PRX* proxy) noexcept
+        explicit Execution(PRX* proxy) noexcept
             : proxy_{proxy}
         {}
 
@@ -1893,7 +1893,7 @@ private:
 template <std::size_t SZ>
 class ProxySO final: public detail::AbstractProxy<ProxySO<SZ>, SZ> {
 public:
-    ProxySO(std::string soname)
+    explicit ProxySO(std::string soname)
         : detail::AbstractProxy<ProxySO, SZ>{soname}
     {
         using namespace detail;

@@ -229,7 +229,7 @@ TEST(ProxyTest, TwoProxiesStringBack2BackStringReturn) {
 }
 
 TEST(ProxyDLOAPITest, TwoNumericBack2Back) {
-    auto p = Proxy<4096>::Build("./libtest.so");
+    auto p = Proxy<4096>::Build("./libdso_test.so");
     auto result = p.Execute<int>("add"s, 20, 30);
     ASSERT_EQ(result, 50);
     result = p.Execute<int>("add"s, 163, 9);
@@ -245,7 +245,7 @@ TEST(ProxyDLOAPITest, NonExistantDso) {
 }
 
 TEST(ProxyDLOAPITest, NonExistantFunctionInDSO) {
-    auto p = Proxy<4096>::Build("./libtest.so");
+    auto p = Proxy<4096>::Build("./libdso_test.so");
     EXPECT_ANY_THROW(p.Execute<int>("unknown_func"s, 20, 30));
 }
 

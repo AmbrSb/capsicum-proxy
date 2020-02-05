@@ -74,6 +74,14 @@ target_link_libraries(${PROJECT_NAME}_test
                       dl
                       rt
                       )
+
+add_library(dso_dep SHARED
+            ${PROJECT_SOURCE_DIR}/tests/libdep.cpp)
+
+add_library(dso_test SHARED
+            ${PROJECT_SOURCE_DIR}/tests/libtest.cpp)
+target_link_libraries(dso_test dso_dep)
+
 add_test(ProxyTest ${PROJECT_NAME}_test)
 
 include(CPack)

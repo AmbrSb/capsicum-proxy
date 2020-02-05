@@ -22,6 +22,11 @@ if(UseCapsicum)
 	add_definitions(-DProxy_CapabilityMode)
 endif()
 
+if(${PROJECT_NAME}_ENABLE_DEBUG)
+        message(WARNING "Debug messages are enabled.")
+        add_definitions(-DPROXY_DEBUG)
+endif()
+
 enable_testing()
 
 add_compile_options(

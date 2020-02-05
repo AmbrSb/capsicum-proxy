@@ -235,7 +235,9 @@ limit_fd(int fd, std::initializer_list<uint64_t> rights_list)
 	    cap_rights_set(&rights, r);
     int ret = cap_rights_limit(fd, &rights);
     if (ret == -1) {
+#ifdef PROXY_DEBUG
 	PROXY_LOG(DBG) << "Cannot limit capabilites for fd: " << fd << std::endl;
+#endif
 	throw LimitingCapabiliteisFailed{};
     }
 }
@@ -351,7 +353,9 @@ sig_livecheck_handler(int signo) noexcept
 {
     if (has_parent_terminated())
     {
+#ifdef PROXY_DEBUG
         PROXY_LOG(INF) << "Child: parent terminated.";
+#endif
         exit(EC_SIGNAL_LIVECHECK_INSTALLATION);
     }
 }
@@ -428,7 +432,7 @@ open_map_shm(int fd, std::size_t sz, MapMode mm = CH_READ_WRITE) noexcept
     int ret = ftruncate(fd, sz);
     if (ret == -1) {
         PROXY_LOG(ERR) << "Cannot ftruncate shared memory for segment" << std::endl;
-	perror("ftruncate");
+        perror("ftruncate");
         exit(EC_SHM_SEG_TRUNCATE);
     }
     int flags;
@@ -544,15 +548,19 @@ public:
     {
         auto [ptr, fd] = open_map_shm(SZ);
         fd_ = fd;
+#ifdef PROXY_DEBUG
         PROXY_LOG(DBG) << "Created channel fd: " << fd << " size: " << SZ << std::endl;
+#endif
         base_ = reinterpret_cast<std::byte*>(ptr);
     }
 
     Channel(int fd, MapMode mm) noexcept
         : fd_{fd}
     {
+#ifdef PROXY_DEBUG
         PROXY_LOG(DBG) << "Creating channel - fd: " << fd << " size: "
                        << SZ << std::endl;
+#endif
         auto ptr = open_map_shm(fd, SZ, mm);
         base_ = reinterpret_cast<std::byte*>(ptr);
     }
@@ -561,7 +569,9 @@ public:
     {
         if (fd_ < 0)
             return;
+#ifdef PROXY_DEBUG
         PROXY_LOG(DBG) << "Destructing channel. fd: " << fd_ << std::endl;
+#endif
         int ret = PXNOINT(close(fd_));
         if (ret) {
             PROXY_LOG(ERR) << "Cannot close fd " << fd_ << std::endl;
@@ -674,8 +684,10 @@ public:
                 if (ret == nullptr)
                     throw ExtractionBufferOverflow{};
                 char* item = reinterpret_cast<char*>(chan_start);
+#ifdef PROXY_DEBUG
                 PROXY_LOG(DBG) << "Extracted string value: " << item
                                << std::endl;
+#endif
                 std::string item_str {item};
                 std::string::size_type item_sz = item_str.size();
                 /**
@@ -702,8 +714,10 @@ public:
                     throw ExtractionBufferOverflow{};
                 std::add_pointer_t<TYPE> p0;
                 auto item = reinterpret_cast<decltype(p0)>(chan_start);
+#ifdef PROXY_DEBUG
                 PROXY_LOG(DBG) << "Extracted non-string value: " << *item
                                << std::endl;
+#endif
                 /**
                  * Put the extracted string into the results tuple.
                  */
@@ -735,7 +749,9 @@ public:
     auto
     ExtractParams(std::byte* buf)
     {
+#ifdef PROXY_DEBUG
         PROXY_LOG(DBG) << "ExtractParams: " << buf << std::endl;
+#endif
         T tup;
         static_assert(std::tuple_size<T>::value < 17);
         chan_sz_ = SZ;
@@ -774,7 +790,9 @@ public:
     {
         // Inform the child (server) thread that the channel is closed.
         status_ = kRequestHangUp;
+#ifdef PROXY_DEBUG
         PROXY_LOG(DBG) << "Destructing segment";
+#endif
     }
 
 private:
@@ -887,7 +905,9 @@ public:
            T t, Args... args)
     {
         auto base = basenn.get();
+#ifdef PROXY_DEBUG
         PROXY_LOG(DBG) << "Unroll: " << base << "  <-- " << t << std::endl;
+#endif
         /**
          * We handle character strings differently from other types.
          */
@@ -947,15 +967,21 @@ public:
     auto
     ExtractParams()
     {
+#ifdef PROXY_DEBUG
         PROXY_LOG(DBG) << ((side_ == kParent) ? "Parent" : "Child")
                        << " is waiting for its turn" << std::endl;
+#endif
         Wait();
         if (side_ == kChild && segment_.HangUpRequested()) {
+#ifdef PROXY_DEBUG
             PROXY_LOG(DBG) << "Child: Got HangUp request [1]" << std::endl;
+#endif
             throw HangUpRequest{};
         }
+#ifdef PROXY_DEBUG
         PROXY_LOG(DBG) << ((side_ == kParent) ? "Parent" : "Child")
                        << " is going to extract" << std::endl;
+#endif
         return segment_.template ExtractParams<T>(std::data(GetRecvChannel()));
     }
 
@@ -985,7 +1011,9 @@ public:
                 auto [yes, exitcode, usage] = has_child_terminated(child_pid_);
                 if (yes) {
                     segment_.turn_ = kParent;
+#ifdef PROXY_DEBUG
                     PROXY_LOG(DBG) << "Child Terminated with exit code: " << exitcode << std::endl;
+#endif
                     throw ChildTerminated{exitcode, usage};
                 }
             }
@@ -1208,19 +1236,27 @@ public:
     void
     StartServiceLoop(SegmentDescriptor<SZ>* segd) noexcept
     {
+#ifdef PROXY_DEBUG
         PROXY_LOG(DBG) << "Starting Service Loop." << std::endl;
+#endif
         while (true) {
             try {
                 auto ins = segd->template ExtractParams<std::tuple<Args...>>();
                 RET result = static_cast<SUB*>(this)->template Do<RET>(ins);
+#ifdef PROXY_DEBUG
                 PROXY_LOG(DBG) << "Child: Result ready: " << result << std::endl;
+#endif
                 // Send the result back to the parent process.
                 segd->SendRequest(result);
             } catch (ParentTerminated& pte) {
+#ifdef PROXY_DEBUG
                 PROXY_LOG(DBG) << "Child: Parent terminated" << std::endl;
+#endif
                 exit(EC_OK);
             } catch (HangUpRequest&) {
+#ifdef PROXY_DEBUG
                 PROXY_LOG(DBG) << "Child: Got hangup request [2]" << std::endl;
+#endif
                 /**
                  * Free the segment and channel resources and return from this
                  * function to terminate this service this.
@@ -1259,7 +1295,9 @@ public:
     {
         Command cmd;
         cmd.code = kShutDownRequest;
+#ifdef PROXY_DEBUG
         PROXY_LOG(DBG) << "Going to send Shutdown request to child" << std::endl;
+#endif
         int ret = PXNOINT(write(GetCommandSocket(), &cmd, sizeof(cmd)));
         if (ret == -1) {
             PROXY_LOG(ERR) << "Cannot write kShutdown request";
@@ -1371,8 +1409,11 @@ protected:
 
         void* m = open_map_shm(segfd, seg_memsz);
         int ret = PXNOINT(close(segfd));
-        if (ret == -1)
+        if (ret == -1) {
+#ifdef PROXY_DEBUG
             PROXY_LOG(DBG) << "Cannot close segfd in child" << std::endl;
+#endif
+        }
         Segment<SZ>* seg = new (m) Segment<SZ>{side == kParent, seg_memsz};
         auto segd = new SegmentDescriptor<SZ>(sndfd, rcvfd, side, *seg, child_pid_);
         return segd;
@@ -1385,7 +1426,9 @@ protected:
     void
     CommandServerLoop()
     {
+#ifdef PROXY_DEBUG
         PROXY_LOG(DBG) << "Starting command loop for child." << std::endl;
+#endif
         while (true) {
             auto cmd = WaitForCommand();
             switch (cmd.code)
@@ -1397,10 +1440,12 @@ protected:
              * handle requests of this type.
              */
             case kNewChannel:
+#ifdef PROXY_DEBUG
                 PROXY_LOG(DBG) << "Child: Got command: kNewChannel - fds: "
                                << cmd.segfd << " "
                                << cmd.sndfd << " "
                                << cmd.rcvfd << std::endl;
+#endif
                 // Extract the service function from the Command object
                 using WT = void(*)(decltype(this), SegmentDescriptor<SZ>*);
                 WT service_func;
@@ -1424,7 +1469,9 @@ protected:
              * the thread responsible for handing requests of a specific type.
              */
             case kHangUp:
+#ifdef PROXY_DEBUG
                 PROXY_LOG(DBG) << "Child: Got command: kHangUp" << std::endl;
+#endif
                 break;
 
             /**
@@ -1432,12 +1479,16 @@ protected:
              * (server) process completely.
              */
             case kShutDownRequest:
+#ifdef PROXY_DEBUG
                 PROXY_LOG(DBG) << "Child: Got command: kShutDown" << std::endl;
+#endif
                 exit(EC_OK);
                 break;
             }
         }
+#ifdef PROXY_DEBUG
         PROXY_LOG(INF) << "Child command loop terminated." << std::endl;
+#endif
         exit(EC_CHILD_LOOP_TERMINATED);
     }
 
@@ -1451,7 +1502,9 @@ protected:
         int ret = PXNOINT(write(GetCommandSocket(), reinterpret_cast<void const*>(&cmd),
                                 sizeof(cmd)));
         if (ret == -1) {
+#ifdef PROXY_DEBUG
                 PROXY_LOG(INF) << "Client: Writing to command socket failed." << std::endl;
+#endif
                 throw ParentWrite2CommandSocketFailed{};
         }
     }
@@ -1508,7 +1561,9 @@ protected:
     void
     StartServer()
     {
+#ifdef PROXY_DEBUG
         PROXY_LOG(DBG) << "About to fork()";
+#endif
         pid_t pid = fork();
         if (pid == 0) {
             // Child (Server)
@@ -1607,8 +1662,10 @@ public:
         _(Args... args)
         {
             if (!segd_) {
+#ifdef PROXY_DEBUG
                 PROXY_LOG(DBG) << "+ Creating new segment descriptor." << std::endl;
                 PROXY_LOG(DBG) << "+ New segment descriptor" << std::endl;
+#endif
                 segd_ = proxy_->OpenChannel(kParent);
                 stub_ = new Stub<SZ>(*segd_);
                 auto service_func =
@@ -1618,7 +1675,9 @@ public:
                                            segd_->GetRcvFd(),
                                            service_func);
             } else {
+#ifdef PROXY_DEBUG
                 PROXY_LOG(DBG) << "Reusing existing segment descriptor." << std::endl;
+#endif
             }
             stub_->SendRequest(args...);
             RET result = stub_->template ExtractParams<RET>();
@@ -1717,13 +1776,19 @@ public:
         } else {
             execution = std::any_cast<EXETYPE*>(std::get<1>(*iter));
             if (sel == kStop) {
+#ifdef PROXY_DEBUG
                 PROXY_LOG(DBG) << "Parent: Got kStop command for Execution instance";
+#endif
                 executions->erase(iter);
+#ifdef PROXY_DEBUG
                 PROXY_LOG(DBG) << "executions count: " << executions->size() << std::endl;
+#endif
                 delete execution;
                 return RET{};
             } else if (sel == kShutDown) {
+#ifdef PROXY_DEBUG
                 PROXY_LOG(DBG) << "Parent: Got kShutDown command for Execution instance";
+#endif
                 executions->erase(iter);
                 for (auto& e : *executions)
                     delete std::any_cast<EXETYPE*>(std::get<1>(e));
@@ -1897,7 +1962,9 @@ public:
         : detail::AbstractProxy<ProxySO, SZ>{soname}
     {
         using namespace detail;
+#ifdef PROXY_DEBUG
         PROXY_LOG(DBG) << "Going to dlopen '" << soname << "'" << std::endl;
+#endif
         if (this->side_ == kChild) {
 #if defined(__FreeBSD__) && defined(Proxy_CapabilityMode)
             handle_ = fdlopen(this->sofd_, RTLD_LOCAL | RTLD_NOW);
@@ -1905,7 +1972,9 @@ public:
             handle_ = dlopen(soname.c_str(), RTLD_LOCAL | RTLD_NOW);
 #endif
             if (!handle_) {
+#ifdef PROXY_DEBUG
                 PROXY_LOG(ERR) << "Failed to open DSO: " << dlerror() << std::endl;
+#endif
                 exit(EC_Opening_DSO_Failed);
             }
         }
@@ -1935,8 +2004,10 @@ public:
         auto func_iter = funcs_.find(func_name);
         if (func_iter == funcs_.end()) {
             /* Function is not in cache (i.e not already looked up). */
+#ifdef PROXY_DEBUG
             PROXY_LOG(DBG) << "DSO function cache miss: ("
                            << func_name.c_str() << ")" << std::endl;
+#endif
             func_ptr = (func_type)dlsym(handle_, func_name.c_str());
             funcs_[func_name] = reinterpret_cast<void*>(func_ptr);
             if (!func_ptr) {
@@ -1945,8 +2016,10 @@ public:
                 throw DSOFunctionLookupFailed{};
             }
         } else {
+#ifdef PROXY_DEBUG
             PROXY_LOG(DBG) << "DSO function cache hit: ("
                            << func_name.c_str() << ")" << std::endl;
+#endif
             func_ptr = reinterpret_cast<func_type>(std::get<1>(*(func_iter)));
         }
         /**

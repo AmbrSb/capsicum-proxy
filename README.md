@@ -5,11 +5,12 @@ All similar requests can be run in a single sandbox to avoid the overhead of pro
 
 # Example
 ## Sandboxing a DSO
-If you have a library libtest.so that has a function named 'add' that takes two integers and returns the sum, then you can easily sandbox the DSO as easily as:
+If you have a library libtest.so that has a function named 'add' that takes two integers and returns the sum, then you can sandbox the DSO as easily as:
 ```C++
     auto p = Proxy<4096>::Build("./libtest.so");
     auto result = p.Execute<int>("add"s, 20, 30);
 ```
+Here 4096 is the size of the shared memory segment used as the communication channel between the client and the sandboxed server.
 ## Sandboxing part of the source code
 You should create a class that has a method named 'Handle' with appropriate signature.
 ```c++
@@ -24,7 +25,7 @@ You should create a class that has a method named 'Handle' with appropriate sign
         }
     };
 ```
-Then sandbox it as this:
+Then you can sandbox the code as follows:
 ```C++
     auto p = Proxy<4096, Service>::Build();
     auto result = p.Execute<std::string>("echo request"s);
